@@ -1,9 +1,11 @@
 # ci.yml — validation and smoke-testing for every push/PR, plus a real
-# Windows build + smoke test against PostgreSQL 18.
+# Windows build + smoke test against one or more PostgreSQL majors.
 #
-# The complete PostgreSQL 14-18 release matrix is intentionally NOT run here;
-# it runs only in release.yml when an actual release is being produced.
-# This keeps the fast path fast for documentation-only changes.
+# A scope-aware change detector decides which PostgreSQL versions to build:
+# core changes (CMake, source, patches, build/test/install scripts) trigger
+# the full 14-18 matrix; other build-relevant changes (CI YAML, workflow
+# config) build only PG 18. Documentation-only changes skip the build
+# entirely, keeping the fast path fast.
 
 name: ci
 
@@ -103,6 +105,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       build: ${{ steps.diff.outputs.build }}
+      pgMajors: ${{ steps.diff.outputs.pgMajors }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -114,6 +117,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
+            echo 'pgMajors=["14","15","16","17","18"]' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -123,22 +127,33 @@ jobs:
           fi
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
+            echo 'pgMajors=["14","15","16","17","18"]' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           CHANGED=$(git diff --name-only "$BASE"...HEAD | grep -vE '(^README\.md$|^BUILDING\.md$|^RELEASING\.md$|^SECURITY\.md$|^THIRD_PARTY_NOTICES\.md$|^LICENSE$|^\.github/(dependabot\.yml|release-body-template\.md)$)' || true)
           if [ -n "$CHANGED" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
+            if echo "$CHANGED" | grep -qE '^(CMakeLists\.txt|cmake/|patches/|src/|scripts/(Build-PgLogical|Test-PgLogical|Package-PgLogical|Install-PostgreSql|common)\.ps1)$'; then
+              echo 'pgMajors=["14","15","16","17","18"]' >> "$GITHUB_OUTPUT"
+            else
+              echo 'pgMajors=["18"]' >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "build=false" >> "$GITHUB_OUTPUT"
+            echo 'pgMajors=["18"]' >> "$GITHUB_OUTPUT"
           fi
 
   build-smoke:
-    name: Windows build + smoke test (PostgreSQL 18)
+    name: Windows build + smoke test (PostgreSQL ${{ matrix.pgMajor }})
     needs: [lint, changes]
     if: ${{ needs.changes.outputs.build == 'true' }}
     runs-on: windows-2022
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        pgMajor: ${{ fromJson(needs.changes.outputs.pgMajors) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -147,13 +162,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: .pg-cache
-          key: pg-binaries-18-${{ hashFiles('.github/pg-versions.json') }}
+          key: pg-binaries-${{ matrix.pgMajor }}-${{ hashFiles('.github/pg-versions.json') }}
 
-      - name: Install official PostgreSQL 18
+      - name: Install official PostgreSQL ${{ matrix.pgMajor }}
         id: install
         shell: pwsh
         run: |
-          $pgRoot = & ./scripts/Install-PostgreSql.ps1 -Major 18
+          $pgRoot = & ./scripts/Install-PostgreSql.ps1 -Major ${{ matrix.pgMajor }}
           "pgRoot=$pgRoot" >> $env:GITHUB_OUTPUT
 
       - name: Clone upstream baseline tag
