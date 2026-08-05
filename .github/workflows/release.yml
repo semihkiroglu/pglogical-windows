@@ -217,6 +217,7 @@ jobs:
           $stage = & ./scripts/Build-PgLogical.ps1 `
             -PgRoot "${{ steps.install.outputs.pgRoot }}" `
             -UpstreamTag "${{ needs.resolve.outputs.upstreamTag }}" `
+            -ExpectedCommitSha "${{ needs.resolve.outputs.commitSha }}" `
             -SourceDir $src `
             -SkipClone `
             -OutputStaging
@@ -280,6 +281,17 @@ jobs:
           "zip=$zip" >> $env:GITHUB_OUTPUT
           "pkgDir=${{ runner.temp }}/pkg" >> $env:GITHUB_OUTPUT
 
+      - name: Record EDB binaries SHA-256 in package
+        shell: pwsh
+        run: |
+          $zips = @(Get-ChildItem .pg-cache -Filter 'postgresql-*.zip' -File | Sort-Object LastWriteTime -Descending)
+          if ($zips.Count -eq 0) { throw "No EDB binaries zip found in .pg-cache" }
+          $zip = $zips[0]
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $hashFile = Join-Path "${{ steps.package.outputs.pkgDir }}" 'edb-binaries.sha256'
+          "$hash  $($zip.Name)" | Set-Content -Path $hashFile -Encoding ascii
+          Write-Host "EDB binaries SHA-256: $hash ($($zip.Name))"
+
       - name: Upload package artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -295,6 +307,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     concurrency:
       group: release-${{ github.workflow }}-${{ github.ref }}-pg${{ matrix.pgMajor }}
       cancel-in-progress: false
@@ -373,6 +387,7 @@ jobs:
           $upstreamRepo = Get-UpstreamRepository
           $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           $checksums = (Get-Content artifacts/SHA256SUMS.txt) -join "`n"
+          $edbHash = if (Test-Path artifacts/edb-binaries.sha256) { (Get-Content artifacts/edb-binaries.sha256 -Raw).Trim() } else { 'unavailable' }
 
           $template = Get-Content .github/release-body-template.md -Raw
           # PowerShell cannot continue a method chain on a fresh line (a
@@ -386,6 +401,7 @@ jobs:
           $body = $body.Replace('{{PG_MAJOR}}', '${{ matrix.pgMajor }}')
           $body = $body.Replace('{{RUN_URL}}', $runUrl)
           $body = $body.Replace('{{CHECKSUMS}}', $checksums)
+          $body = $body.Replace('{{EDB_BINARIES_SHA256}}', $edbHash)
           $body | Set-Content -Path release-body.md -Encoding utf8
 
           $releaseTag = '${{ steps.tag.outputs.releaseTag }}'
@@ -402,6 +418,12 @@ jobs:
           tag="${{ steps.tag.outputs.releaseTag }}"
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" artifacts/*.zip artifacts/SHA256SUMS.txt
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
+
+      - name: Generate artifact attestation
+        if: steps.existing.outputs.exists == 'false'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
+        with:
+          subject-path: artifacts/*.zip
 
       - name: Publish release
         if: steps.existing.outputs.exists == 'false'
