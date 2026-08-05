@@ -84,8 +84,7 @@ pglogical copyright notice is included in each package.
    for their PostgreSQL major.
 5. Follow the official pglogical documentation for server configuration
    (`postgresql.conf` settings), `CREATE EXTENSION pglogical`, and node /
-   subscription setup:
-   <https://github.com/2ndQuadrant/pglogical/blob/REL2_x_STABLE/docs/README.md>.
+   subscription setup: <https://github.com/2ndQuadrant/pglogical>.
 
 ## Local build
 
