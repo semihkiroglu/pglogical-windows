@@ -191,4 +191,5 @@ jobs:
           ./scripts/Test-PgLogical.ps1 `
             -PgRoot "${{ steps.install.outputs.pgRoot }}" `
             -StagingDir "${{ steps.build.outputs.stage }}" `
-            -UpstreamVersion "${{ needs.lint.outputs.baselineTag }}".Replace('REL', '').Replace('_', '.')
+            -UpstreamVersion "${{ needs.lint.outputs.baselineTag }}".Replace('REL', '').Replace('_', '.') `
+            -AllowTemporaryLocalUser

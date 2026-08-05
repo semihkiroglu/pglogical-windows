@@ -28,7 +28,10 @@
     PostgreSQL's postmaster refuses. When the current process is elevated,
     initdb/pg_ctl/postgres are launched through "runas /trustlevel:0x20000"
     (a restricted token without the Administrators group), which satisfies
-    the postmaster's check without any machine-global changes.
+    the postmaster's check without any machine-global changes. On CI the
+    de-elevation account is created with explicit consent (CI passes
+    -AllowTemporaryLocalUser); elevated runs outside CI fail with a clear
+    error instead of silently creating a local system user.
 
 .PARAMETER PgRoot
     The isolated PostgreSQL installation (PG_ROOT).
@@ -47,6 +50,13 @@
 .PARAMETER KeepDataDir
     Keep the temporary cluster directory (for debugging).
 
+.PARAMETER AllowTemporaryLocalUser
+    Opt-in for the temporary de-elevation account. When running elevated
+    outside CI (a developer machine), the script refuses to create or
+    modify a local system user unless this switch is passed. CI always
+    passes it; local elevated runs must re-run from a non-elevated shell
+    or opt in explicitly.
+
 .EXAMPLE
     pwsh ./scripts/Test-PgLogical.ps1 -PgRoot "C:\pg\18" -StagingDir .build\stage -UpstreamVersion 2.4.8
 #>
@@ -56,7 +66,8 @@ param(
     [Parameter(Mandatory = $true)][string]$StagingDir,
     [Parameter(Mandatory = $true)][string]$UpstreamVersion,
     [string]$WorkDir,
-    [switch]$KeepDataDir
+    [switch]$KeepDataDir,
+    [switch]$AllowTemporaryLocalUser
 )
 
 Set-StrictMode -Version Latest
@@ -113,6 +124,15 @@ function Test-Elevated {
 function Ensure-PgTaskAccount {
     if ($script:pgTaskAccountReady) { return $true }
     if (-not (Test-Elevated)) { return $false }
+    # Guard: never create/modify a local system user without consent.
+    # GitHub Actions runners are ephemeral and opt in via
+    # -AllowTemporaryLocalUser (GITHUB_ACTIONS=true is not sufficient on
+    # its own — the switch is the explicit consent). On a developer
+    # machine an elevated shell must either re-run de-elevated or pass
+    # the switch; silently touching local accounts is surprising.
+    if ($env:GITHUB_ACTIONS -ne 'true' -and -not $AllowTemporaryLocalUser) {
+        throw "Running elevated outside CI: Test-PgLogical would create a temporary local user 'pglci' to run PostgreSQL de-elevated. Re-run from a non-elevated shell, or pass -AllowTemporaryLocalUser to allow the temporary user explicitly."
+    }
     $script:pgTaskUser = 'pglci'
     $script:pgTaskPw = 'PglC1!2026Ephemeral'
     & net.exe user $script:pgTaskUser 2>&1 | Out-Null
