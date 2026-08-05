@@ -1,0 +1,189 @@
+# ci.yml — validation and smoke-testing for every push/PR, plus a real
+# Windows build + smoke test against PostgreSQL 18.
+#
+# The complete PostgreSQL 14-18 release matrix is intentionally NOT run here;
+# it runs only in release.yml when an actual release is being produced.
+# This keeps the fast path fast for documentation-only changes.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Static validation (PowerShell, YAML, JSON, manifests)
+    runs-on: ubuntu-24.04
+    outputs:
+      baselineTag: ${{ steps.config.outputs.baselineTag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: PowerShell static analysis
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -MinimumVersion 1.21
+          $results = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error
+          if ($results.Count -gt 0) {
+            $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+            throw "PSScriptAnalyzer found $($results.Count) issue(s)"
+          }
+          Write-Host 'PSScriptAnalyzer: no issues'
+
+      - name: YAML validation
+        run: |
+          python3 -m pip install --user --quiet pyyaml
+          python3 - <<'EOF'
+          import glob, sys, yaml
+          files = glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml')
+          for f in files:
+              with open(f) as fh:
+                  yaml.safe_load(fh)
+              print(f'OK: {f}')
+          print(f'Validated {len(files)} YAML files')
+          EOF
+
+      - name: JSON validation
+        run: |
+          python3 - <<'EOF'
+          import glob, json
+          files = (glob.glob('*.json') +
+                   glob.glob('.github/pg-versions.json') +
+                   glob.glob('cmake/*.json'))
+          for f in files:
+              with open(f) as fh:
+                  json.load(fh)
+              print(f'OK: {f}')
+          print(f'Validated {len(files)} JSON files')
+          EOF
+
+      - name: Config shape validation (new .github/pg-versions.json)
+        id: config
+        shell: pwsh
+        run: |
+          . ./scripts/common.ps1
+          $config = Import-VersionConfig
+          Write-Host "Config validated: upstream repo=$(Get-UpstreamRepository), majors=$($config.postgresqlMajors -join ',')"
+
+          # Validate shape: postgresqlMajors must be an array of numeric strings
+          if (@($config.postgresqlMajors).Count -eq 0) {
+            throw 'postgresqlMajors is empty'
+          }
+          foreach ($m in @($config.postgresqlMajors)) {
+            if ($m -notmatch '^\d+$') {
+              throw "postgresqlMajors contains non-numeric value: $m"
+            }
+          }
+          Write-Host 'Config shape OK'
+
+          # Derive the baseline tag from config (single source of truth)
+          $baselineTag = ConvertFrom-PgLogicalVersion -Version $config.releaseBaseline
+          Write-Host "Baseline upstream tag from config: $baselineTag"
+          "baselineTag=$baselineTag" >> $env:GITHUB_OUTPUT
+
+  # ---------------------------------------------------------------------------
+  # Change detection: skip expensive Windows build for doc-only changes
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect whether build-relevant files changed
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.diff.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Compute change scope
+        id: diff
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE"...HEAD | grep -vE '(^README\.md$|^BUILDING\.md$|^RELEASING\.md$|^SECURITY\.md$|^THIRD_PARTY_NOTICES\.md$|^LICENSE$|^\.github/(dependabot\.yml|release-body-template\.md)$)' || true)
+          if [ -n "$CHANGED" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-smoke:
+    name: Windows build + smoke test (PostgreSQL 18)
+    needs: [lint, changes]
+    if: ${{ needs.changes.outputs.build == 'true' }}
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Cache PostgreSQL binaries
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: .pg-cache
+          key: pg-binaries-18-${{ hashFiles('.github/pg-versions.json') }}
+
+      - name: Install official PostgreSQL 18
+        id: install
+        shell: pwsh
+        run: |
+          $pgRoot = & ./scripts/Install-PostgreSql.ps1 -Major 18
+          "pgRoot=$pgRoot" >> $env:GITHUB_OUTPUT
+
+      - name: Clone upstream baseline tag
+        shell: pwsh
+        run: |
+          . ./scripts/common.ps1
+          $repo = Get-UpstreamRepository
+          $tag = '${{ needs.lint.outputs.baselineTag }}'
+          $src = ".build/$tag/upstream"
+          if (-not (Test-Path $src)) {
+            New-Item -ItemType Directory -Force -Path ".build/$tag" | Out-Null
+            git clone --quiet --depth 1 --branch $tag "https://github.com/$repo.git" $src
+          }
+          Write-Host "Upstream checkout at: $src"
+
+      - name: Build with CMake + MSVC
+        id: build
+        shell: pwsh
+        timeout-minutes: 30
+        run: |
+          $src = ".build/${{ needs.lint.outputs.baselineTag }}/upstream"
+          $stage = & ./scripts/Build-PgLogical.ps1 `
+            -PgRoot "${{ steps.install.outputs.pgRoot }}" `
+            -UpstreamTag "${{ needs.lint.outputs.baselineTag }}" `
+            -SourceDir $src `
+            -SkipClone `
+            -OutputStaging
+          if (-not $stage) { throw "Build-PgLogical produced no staging dir" }
+          "stage=$stage" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke test (e2e replication + subscriber utility)
+        shell: pwsh
+        timeout-minutes: 30
+        run: |
+          ./scripts/Test-PgLogical.ps1 `
+            -PgRoot "${{ steps.install.outputs.pgRoot }}" `
+            -StagingDir "${{ steps.build.outputs.stage }}" `
+            -UpstreamVersion "${{ needs.lint.outputs.baselineTag }}".Replace('REL', '').Replace('_', '.')

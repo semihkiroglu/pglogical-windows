@@ -1,0 +1,108 @@
+# pg-versions-sync.yml — derives the PostgreSQL major matrix from PostgreSQL.org
+# versions.json and verified EDB Windows binary availability.
+#
+# This workflow owns only matrix state. Release discovery and dispatch remain
+# separate so a transient EDB delay cannot create a release workflow failure.
+
+name: pg-versions-sync
+
+on:
+  schedule:
+    # Run before upstream-watch's daily 03:30 UTC discovery pass.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pg-versions-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync PostgreSQL version matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      configChanged: ${{ steps.sync.outputs.configChanged }}
+      candidateNewMajors: ${{ steps.sync.outputs.candidateNewMajors }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Derive matrix from pg.org and EDB availability
+        id: sync
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . ./scripts/common.ps1
+          # Pass 1: EOL removal + candidate detection. New majors are NOT
+          # persisted by the script until the caller applies the upstream
+          # compatibility policy (design PGL-001 #5: auto-build, not PR).
+          $result = & ./scripts/Update-PgVersions.ps1
+          $changed = [bool]$result.changed
+          $candidates = @($result.candidateNewMajors)
+          $eligible = @()
+          if ($candidates.Count -gt 0) {
+            # Apply the compatibility policy: the latest upstream release must
+            # carry a compat<major> directory for the candidate to be built.
+            $repo = Get-UpstreamRepository
+            $latest = $null
+            try {
+              $latest = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers (Get-GitHubHeaders) -Method Get
+            }
+            catch {
+              $statusCode = $null
+              if ($null -ne $_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+              }
+              if ($statusCode -eq 404) {
+                Write-Host 'No published upstream releases (all draft/prerelease); cannot verify compat dirs. New majors are not added.'
+              }
+              else {
+                throw
+              }
+            }
+            if ($latest) {
+              Write-Host "Latest upstream release: $($latest.tag_name)"
+              git clone --quiet --depth 1 --branch $latest.tag_name "https://github.com/$repo.git" upstream
+              $compatDirs = @(Get-ChildItem upstream -Directory -Filter 'compat*' | ForEach-Object {
+                if ($_.Name -match '^compat([0-9]+)$') { $matches[1] }
+              })
+              $eligible = @($candidates | Where-Object { $compatDirs -contains $_ })
+              $blocked = @($candidates | Where-Object { $compatDirs -notcontains $_ })
+              Write-Host "Upstream $($latest.tag_name) compat dirs: $($compatDirs -join ', ')"
+              Write-Host "Eligible new majors (compat verified): $($eligible -join ', ')"
+              if ($blocked.Count -gt 0) {
+                Write-Host "New majors without upstream compat dir (not added): $($blocked -join ', ')"
+              }
+            }
+          }
+          # Pass 2: persist eligible new majors (and any EOL removal from pass 1).
+          if ($eligible.Count -gt 0) {
+            $result = & ./scripts/Update-PgVersions.ps1 -EligibleNewMajors $eligible
+            $changed = $changed -or [bool]$result.changed
+          }
+          "configChanged=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          if ($eligible.Count -eq 0) {
+            $eligibleJson = '[]'
+          }
+          else {
+            $eligibleJson = $eligible | ConvertTo-Json -Compress -AsArray
+          }
+          "candidateNewMajors=$eligibleJson" >> $env:GITHUB_OUTPUT
+
+      - name: Commit matrix update
+        if: steps.sync.outputs.configChanged == 'true'
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add .github/pg-versions.json
+          if git diff --cached --quiet; then
+            echo 'Matrix was reported changed but pg-versions.json is unchanged; skipping commit.'
+            exit 0
+          fi
+          git commit -m 'PGL-001: Sync PostgreSQL version matrix'
+          git push origin "HEAD:${GITHUB_REF_NAME}"

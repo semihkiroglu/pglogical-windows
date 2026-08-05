@@ -1,0 +1,117 @@
+# upstream-watch.yml — discovers the latest upstream pglogical release
+# and dispatches Windows packaging builds for missing release × major
+# combinations.
+#
+# Runs daily on an Ubuntu runner (cheap) and only dispatches Windows builds
+# when something is actually missing. The build itself happens in
+# release.yml, which has per-version concurrency protection.
+#
+# We deliberately do NOT listen for upstream release events: external
+# repositories cannot deliver events to this workflow, and the /releases/latest
+# API is idempotent and safe to poll.
+
+name: upstream-watch
+
+on:
+  schedule:
+    # Off-hour daily run; deliberately not minute zero to avoid load spikes.
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write    # dispatch release.yml
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Upstream discovery: query /releases/latest and compute the build plan.
+  # ---------------------------------------------------------------------------
+  discover:
+    name: Discover latest upstream release
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    outputs:
+      planCount: ${{ steps.plan.outputs.planCount }}
+      planJson: ${{ steps.plan.outputs.planJson }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Compute build plan
+        id: plan
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # pg-versions-sync.yml runs as a separate workflow, so the checkout is
+          # already current; no re-checkout dance needed here.
+          ./scripts/Get-UpstreamReleases.ps1 -OutputFile release-plan.json
+          $plan = Get-Content release-plan.json -Raw | ConvertFrom-Json
+          "planCount=$($plan.plan.Count)" >> $env:GITHUB_OUTPUT
+          # Store the JSON for the notify job
+          $planJson = ($plan | ConvertTo-Json -Depth 6 -Compress)
+          "planJson<<EOF" >> $env:GITHUB_OUTPUT
+          $planJson >> $env:GITHUB_OUTPUT
+          "EOF" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-plan
+          path: release-plan.json
+          if-no-files-found: error
+
+      - name: Summarize
+        shell: pwsh
+        run: |
+          $plan = Get-Content release-plan.json -Raw | ConvertFrom-Json
+          if ($plan.plan.Count -eq 0) {
+            Write-Host 'Latest upstream release is already fully packaged. Nothing to do.'
+            return
+          }
+          foreach ($p in $plan.plan) {
+            Write-Host "MISSING: $($p.version) ($($p.upstreamTag) @ $($p.commitSha)) -> $($p.localTag)"
+          }
+
+  # ---------------------------------------------------------------------------
+  # Dispatch: trigger release.yml for each missing version × major.
+  # ---------------------------------------------------------------------------
+  dispatch:
+    name: Dispatch release builds
+    needs: discover
+    if: ${{ !cancelled() && needs.discover.outputs.planCount != '0' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Download build plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-plan
+
+      - name: Dispatch release for each missing entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $plan = Get-Content release-plan.json -Raw | ConvertFrom-Json
+          foreach ($p in $plan.plan) {
+            Write-Host "Dispatching release for $($p.version) PG $($p.pgMajor) (tag $($p.upstreamTag), revision $($p.packagingRevision))"
+            gh workflow run release.yml `
+              --repo $env:GITHUB_REPOSITORY `
+              --ref $env:GITHUB_REF_NAME `
+              -f upstreamTag="$($p.upstreamTag)" `
+              -f packagingRevision="$($p.packagingRevision)" `
+              -f postgresMajors="$($p.pgMajor)" `
+              -f dryRun=false
+            if ($LASTEXITCODE -ne 0) { throw "gh workflow run failed for $($p.upstreamTag) PG $($p.pgMajor)" }
+          }
+          Write-Host 'Dispatched all missing releases. release.yml concurrency groups prevent duplicate publication.'

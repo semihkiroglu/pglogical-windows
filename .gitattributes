@@ -1,0 +1,15 @@
+# Treat all files as binary-safe on checkout/checkin; this repository contains
+# no text files that require EOL rewriting. Line endings are normalized per
+# .editorconfig instead.
+* -text
+
+# PowerShell scripts are executed on Windows and must keep CRLF.
+*.ps1 text eol=crlf
+
+# Workflow and documentation files: keep whatever is committed (LF).
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf

@@ -1,0 +1,468 @@
+# release.yml — builds and publishes Windows x64 packages for one
+# upstream pglogical release, across all supported PostgreSQL majors.
+#
+# Reusable (workflow_call) and manually dispatchable (workflow_dispatch).
+# Never publishes partial results: a draft GitHub release is created only
+# after the build plan is valid, all assets are uploaded, and the release is
+# published only after every matrix build succeeded.
+#
+# Least-privilege permissions: contents: read everywhere except the publish
+# job, which needs contents: write for the release itself.
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstreamTag:
+        description: 'Upstream pglogical release tag (defaults to the releaseBaseline from .github/pg-versions.json when empty)'
+        required: false
+        type: string
+        default: ''
+      packagingRevision:
+        description: 'Packaging revision, e.g. 1 (windows.1). Bump only for rebuilds caused by packaging changes.'
+        required: false
+        type: number
+        default: 1
+      postgresMajors:
+        description: 'Comma-separated PostgreSQL majors to build (default: all configured majors supported by the release)'
+        required: false
+        type: string
+        default: ''
+      dryRun:
+        description: 'Build and test only; do not create or publish a release'
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      upstreamTag:
+        required: true
+        type: string
+      packagingRevision:
+        required: false
+        type: number
+        default: 1
+      postgresMajors:
+        required: false
+        type: string
+        default: ''
+      dryRun:
+        required: false
+        type: boolean
+        default: false
+    # No repository secrets are used by this workflow; GITHUB_TOKEN is
+    # sufficient for release publication, so no secrets are declared here.
+
+# Per-major concurrency lives at job level (matrix context is not
+# available in a top-level concurrency group). Without the pgMajor
+# suffix, all five majors share one group and GitHub cancels queued runs
+# when a new dispatch arrives — exactly one release would ever publish.
+
+# No top-level `permissions` key: when this workflow is invoked as a reusable
+# workflow, GitHub resolves permissions from the caller. Job-level permissions
+# below keep the least-privilege model (contents: write only in publish).
+
+jobs:
+  resolve:
+    name: Resolve upstream release and build matrix
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      commitSha: ${{ steps.resolve.outputs.commitSha }}
+      majorsJson: ${{ steps.resolve.outputs.majorsJson }}
+      upstreamTag: ${{ steps.resolve.outputs.upstreamTag }}
+      packagingRevision: ${{ steps.resolve.outputs.packagingRevision }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Resolve release, commit SHA, and PG major matrix
+        id: resolve
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . ./scripts/common.ps1
+          $config = Import-VersionConfig
+          $repo = Get-UpstreamRepository
+
+          $tag = '${{ inputs.upstreamTag }}'
+          if (-not $tag) { $tag = ConvertFrom-PgLogicalVersion -Version $config.releaseBaseline }
+          $pattern = [regex](Get-UpstreamTagPattern)
+          if (-not $pattern.IsMatch($tag)) {
+            throw "Tag '$tag' does not match the upstream release pattern $(Get-UpstreamTagPattern)"
+          }
+          $version = ConvertTo-PgLogicalVersion -Tag $tag
+          if ([version]$version -lt [version]$config.releaseBaseline) {
+            throw "Version $version is below the configured baseline $($config.releaseBaseline); not packaging."
+          }
+
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$tag" -Headers (Get-GitHubHeaders) -Method Get
+          if ($release.draft -or $release.prerelease) {
+            throw "Upstream release $tag is a draft or prerelease; refusing to package it."
+          }
+          $ref = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/ref/tags/$tag" -Headers (Get-GitHubHeaders) -Method Get
+          if ($ref.object.type -eq 'tag') {
+            $tagObj = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/tags/$($ref.object.sha)" -Headers (Get-GitHubHeaders) -Method Get
+            $commitSha = $tagObj.object.sha
+          } else {
+            $commitSha = $ref.object.sha
+          }
+          Write-Host "Upstream $tag ($version) @ $commitSha"
+
+          # Determine feasible majors: configured majors ∩ upstream compat dirs.
+          # This is a cheap feasibility check, not a support-policy decision.
+          git clone --quiet --depth 1 --branch $tag "https://github.com/$repo.git" upstream
+          $compatDirs = @(Get-ChildItem upstream -Directory -Filter 'compat*' | ForEach-Object {
+            if ($_.Name -match '^compat([0-9]+)$') { $matches[1] }
+          } | Sort-Object { [int]$_ })
+          $configured = @($config.postgresqlMajors | ForEach-Object { [string]$_ })
+          $requested = @()
+          if ('${{ inputs.postgresMajors }}') {
+            $requested = @('${{ inputs.postgresMajors }}'.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          }
+
+          # postgresqlMajors is the only configured-major source. An explicit
+          # input may narrow that list, but can never introduce an unconfigured
+          # major into the build matrix.
+          $configuredFeasible = @($configured | Where-Object { $compatDirs -contains $_ })
+          $skipped = @($configured | Where-Object { $compatDirs -notcontains $_ })
+          $unknownRequested = @($requested | Where-Object { $configured -notcontains $_ })
+          $majors = if ($requested.Count -gt 0) {
+            @($configuredFeasible | Where-Object { $requested -contains $_ })
+          } else {
+            $configuredFeasible
+          }
+          $majors = @($majors | Sort-Object { [int]$_ })
+
+          if ($skipped.Count -gt 0) { Write-Host "Skipped (no upstream compat dir; feasibility only): $($skipped -join ', ')" }
+          if ($unknownRequested.Count -gt 0) { Write-Host "Ignored unconfigured requested majors: $($unknownRequested -join ', ')" }
+          if ($majors.Count -eq 0) {
+            Write-Host "No configured PostgreSQL majors are feasible for $tag; skipping Windows build matrix."
+          }
+          Write-Host "Build matrix: $($majors -join ', ')"
+
+          $revision = [int]'${{ inputs.packagingRevision }}'
+          if ($revision -lt 1) { $revision = 1 }
+          # No single release tag anymore: each PG major gets its own release
+          # (pglogical-<v>-pg<major>-windows.N), computed in the publish job.
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "commitSha=$commitSha" >> $env:GITHUB_OUTPUT
+          "upstreamTag=$tag" >> $env:GITHUB_OUTPUT
+          "packagingRevision=$revision" >> $env:GITHUB_OUTPUT
+          # -AsArray: a single-element list must still serialize as a JSON array.
+          # Emit [] explicitly so an all-skipped feasibility check remains a
+          # successful no-op instead of producing an unset matrix output.
+          $majorsJson = if ($majors.Count -gt 0) {
+            $majors | ConvertTo-Json -Compress -AsArray
+          } else {
+            '[]'
+          }
+          "majorsJson=$majorsJson" >> $env:GITHUB_OUTPUT
+
+  build:
+    name: Build + smoke test (PostgreSQL ${{ matrix.pgMajor }})
+    needs: resolve
+    if: ${{ needs.resolve.outputs.majorsJson != '[]' }}
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    concurrency:
+      group: release-${{ github.workflow }}-${{ github.ref }}-pg${{ matrix.pgMajor }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        pgMajor: ${{ fromJson(needs.resolve.outputs.majorsJson) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Cache PostgreSQL binaries
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: .pg-cache
+          key: pg-binaries-${{ matrix.pgMajor }}-${{ hashFiles('.github/pg-versions.json') }}
+
+      - name: Install official PostgreSQL ${{ matrix.pgMajor }}
+        id: install
+        shell: pwsh
+        run: |
+          $pgRoot = & ./scripts/Install-PostgreSql.ps1 -Major ${{ matrix.pgMajor }}
+          "pgRoot=$pgRoot" >> $env:GITHUB_OUTPUT
+
+      - name: Clone upstream tag
+        shell: pwsh
+        run: |
+          . ./scripts/common.ps1
+          $repo = Get-UpstreamRepository
+          $tag = '${{ needs.resolve.outputs.upstreamTag }}'
+          $src = ".build/$tag/upstream"
+          if (-not (Test-Path $src)) {
+            New-Item -ItemType Directory -Force -Path ".build/$tag" | Out-Null
+            git clone --quiet --depth 1 --branch $tag "https://github.com/$repo.git" $src
+          }
+          Write-Host "Upstream checkout at: $src"
+
+      - name: Build with CMake + MSVC
+        id: build
+        shell: pwsh
+        timeout-minutes: 30
+        run: |
+          $src = ".build/${{ needs.resolve.outputs.upstreamTag }}/upstream"
+          $stage = & ./scripts/Build-PgLogical.ps1 `
+            -PgRoot "${{ steps.install.outputs.pgRoot }}" `
+            -UpstreamTag "${{ needs.resolve.outputs.upstreamTag }}" `
+            -SourceDir $src `
+            -SkipClone `
+            -OutputStaging
+          if (-not $stage) { throw "Build-PgLogical produced no staging dir" }
+          "stage=$stage" >> $env:GITHUB_OUTPUT
+          # The subscriber utility must be fully independent of postgres.exe
+          # (loading postgres.exe as a DLL into the utility process crashes
+          # with access violations). Verify the import table.
+          $msvcRoot = Join-Path ${env:ProgramFiles} 'Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC'
+          $dumpbin = Get-ChildItem -Path $msvcRoot -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          if (-not $dumpbin) { $dumpbin = Get-ChildItem -Path $msvcRoot -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          & $dumpbin.FullName /imports (Join-Path $stage 'bin\pglogical_create_subscriber.exe') | Out-String | Set-Content -Path (Join-Path $env:RUNNER_TEMP 'subscriber-imports.txt')
+          $imports = Get-Content (Join-Path $env:RUNNER_TEMP 'subscriber-imports.txt') -Raw
+          Write-Host "Subscriber imports postgres.exe: $($imports -match 'postgres\.exe')"
+          # Also check whether EDB's postgres.exe itself imports pglogical.dll
+          # (that would explain pglogical.dll crashes inside postgres.exe
+          # processes and would make any postgres.exe import from the
+          # subscriber doubly dangerous).
+          & $dumpbin.FullName /imports "${{ steps.install.outputs.pgRoot }}\bin\postgres.exe" | Out-String | Set-Content -Path (Join-Path $env:RUNNER_TEMP 'postgres-imports.txt')
+          $pgImports = Get-Content (Join-Path $env:RUNNER_TEMP 'postgres-imports.txt') -Raw
+          Write-Host "postgres.exe imports pglogical.dll: $($pgImports -match 'pglogical\.dll')"
+          # Map the recurring pglogical.dll crash offset (0x1fe58, background
+          # worker "pglogical supervisor" AV) to a function via the export
+          # table: find the export whose RVA is the largest one <= 0x1fe58.
+          & $dumpbin.FullName /exports (Join-Path $stage 'lib\pglogical.dll') | Out-String | Set-Content -Path (Join-Path $env:RUNNER_TEMP 'pgl-exports.txt')
+          $exports = Get-Content (Join-Path $env:RUNNER_TEMP 'pgl-exports.txt') | Where-Object { $_ -match '^\s+\d+\s+[0-9A-F]{1,8}\s+[0-9A-F]{8}\s+\S' } | ForEach-Object {
+            if ($_ -match '^\s+\d+\s+[0-9A-F]{1,8}\s+([0-9A-F]{8})\s+(\S+)') { [pscustomobject]@{ RVA = [Convert]::ToUInt32($matches[1], 16); Name = $matches[2] } }
+          }
+          $crashRva = 0x1fe58
+          $hit = $exports | Where-Object { $_.RVA -le $crashRva } | Sort-Object RVA -Descending | Select-Object -First 1
+          $next = $exports | Where-Object { $_.RVA -gt $crashRva } | Sort-Object RVA | Select-Object -First 1
+          Write-Host "pglogical.dll crash offset 0x1fe58 maps to function: $($hit.Name) (RVA 0x$('{0:X}' -f $hit.RVA))"
+          if ($next) { Write-Host "  next export: $($next.Name) (RVA 0x$('{0:X}' -f $next.RVA)); offset into function: 0x$('{0:X}' -f ($crashRva - $hit.RVA))" }
+          Write-Host "  all exports:"; $exports | ForEach-Object { Write-Host "    $('0x{0:X}' -f $_.RVA) $($_.Name)" }
+          if ($imports -match 'postgres\.exe') {
+            $imports | Select-String -Pattern 'postgres\.exe|^\s+[0-9A-F]+\s+\w' | Select-Object -First 40 | ForEach-Object { Write-Host "  $($_.Line.Trim())" }
+            Write-Host "WARNING: pglogical_create_subscriber.exe still imports postgres.exe (temporarily non-fatal while crash location is diagnosed)"
+          }
+
+      - name: Smoke test
+        shell: pwsh
+        timeout-minutes: 30
+        run: |
+          ./scripts/Test-PgLogical.ps1 `
+            -PgRoot "${{ steps.install.outputs.pgRoot }}" `
+            -StagingDir "${{ steps.build.outputs.stage }}" `
+            -UpstreamVersion "${{ needs.resolve.outputs.version }}"
+
+      - name: Package ZIP and checksum
+        id: package
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $zip = & ./scripts/Package-PgLogical.ps1 `
+            -StagingDir "${{ steps.build.outputs.stage }}" `
+            -SourceDir ".build/${{ needs.resolve.outputs.upstreamTag }}/upstream" `
+            -Version "${{ needs.resolve.outputs.version }}" `
+            -PgMajor ${{ matrix.pgMajor }} `
+            -OutputDir "${{ runner.temp }}/pkg"
+          if (-not $zip) { throw "Package-PgLogical produced no zip" }
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "pkgDir=${{ runner.temp }}/pkg" >> $env:GITHUB_OUTPUT
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: packages-pg${{ matrix.pgMajor }}
+          path: |
+            ${{ steps.package.outputs.pkgDir }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish release (PostgreSQL ${{ matrix.pgMajor }})
+    needs: [resolve, build]
+    if: ${{ !inputs.dryRun && needs.resolve.outputs.majorsJson != '[]' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.workflow }}-${{ github.ref }}-pg${{ matrix.pgMajor }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        pgMajor: ${{ fromJson(needs.resolve.outputs.majorsJson) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Compute release tag for this PG major
+        id: tag
+        shell: pwsh
+        run: |
+          . ./scripts/common.ps1
+          $tag = Get-LocalReleaseTag `
+            -Version '${{ needs.resolve.outputs.version }}' `
+            -PackagingRevision ([int]'${{ needs.resolve.outputs.packagingRevision }}') `
+            -PgMajor '${{ matrix.pgMajor }}'
+          "releaseTag=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "Release tag: $tag"
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: packages-pg${{ matrix.pgMajor }}
+          path: artifacts
+          merge-multiple: true
+
+      - name: Verify package checksum
+        shell: pwsh
+        run: |
+          $zips = @(Get-ChildItem artifacts -Filter '*.zip' -File)
+          if ($zips.Count -ne 1) {
+            throw "Expected exactly 1 package ZIP for PG ${{ matrix.pgMajor }} but found $($zips.Count): $($zips.Name -join ', ')"
+          }
+          $sums = @(Get-ChildItem artifacts -Filter 'SHA256SUMS.txt' -File | ForEach-Object { Get-Content $_.FullName })
+          foreach ($zip in $zips) {
+            $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $line = $sums | Where-Object { $_ -like "*$($zip.Name)" }
+            if (-not $line) { throw "No checksum line for $($zip.Name)" }
+            if (($line -split '\s+')[0] -ne $actual) { throw "Checksum mismatch for $($zip.Name)" }
+            Write-Host "OK: $($zip.Name) matches SHA256 $actual"
+          }
+          $sums | Set-Content -Path artifacts/SHA256SUMS.txt -Encoding ascii
+          Get-Content artifacts/SHA256SUMS.txt
+
+      - name: Check for an existing release
+        id: existing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # bash: `if gh` checks the native exit code directly. (PowerShell
+          # cannot be used here: the runner's pwsh wrapper sets
+          # $PSNativeCommandUseErrorActionPreference=$true and
+          # $ErrorActionPreference=Stop, so a failing `gh release view`
+          # - the expected "not found" case - throws before $LASTEXITCODE
+          # can be checked.)
+          tag="${{ steps.tag.outputs.releaseTag }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>&1; then
+            echo "Release $tag already exists; not overwriting."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create draft release
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          . ./scripts/common.ps1
+          $upstreamRepo = Get-UpstreamRepository
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $checksums = (Get-Content artifacts/SHA256SUMS.txt) -join "`n"
+
+          $template = Get-Content .github/release-body-template.md -Raw
+          # PowerShell cannot continue a method chain on a fresh line (a
+          # leading '.' is a parse error in every form), so each Replace is a
+          # complete statement of its own.
+          $body = $template.Replace('{{VERSION}}', '${{ needs.resolve.outputs.version }}')
+          $body = $body.Replace('{{UPSTREAM_REPO}}', $upstreamRepo)
+          $body = $body.Replace('{{UPSTREAM_TAG}}', '${{ needs.resolve.outputs.upstreamTag }}')
+          $body = $body.Replace('{{COMMIT_SHA}}', '${{ needs.resolve.outputs.commitSha }}')
+          $body = $body.Replace('{{PACKAGING_REVISION}}', '${{ needs.resolve.outputs.packagingRevision }}')
+          $body = $body.Replace('{{PG_MAJOR}}', '${{ matrix.pgMajor }}')
+          $body = $body.Replace('{{RUN_URL}}', $runUrl)
+          $body = $body.Replace('{{CHECKSUMS}}', $checksums)
+          $body | Set-Content -Path release-body.md -Encoding utf8
+
+          $releaseTag = '${{ steps.tag.outputs.releaseTag }}'
+          gh release create $releaseTag --repo $env:GITHUB_REPOSITORY --draft `
+            --title "pglogical $('${{ needs.resolve.outputs.version }}') (windows.$('${{ needs.resolve.outputs.packagingRevision }}')) — PostgreSQL ${{ matrix.pgMajor }}" `
+            --notes-file release-body.md
+          Write-Host "Draft release created: $releaseTag"
+
+      - name: Upload release assets
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.tag.outputs.releaseTag }}"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" artifacts/*.zip artifacts/SHA256SUMS.txt
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
+
+      - name: Publish release
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --draft=false
+          gh release view "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft'
+
+      - name: Delete incomplete draft on failure
+        if: ${{ failure() && steps.existing.outputs.exists == 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+
+  report-failure:
+    name: Report build failure
+    needs: [resolve, build, publish]
+    if: ${{ failure() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Open issue for failed build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $version = '${{ needs.resolve.outputs.version }}'
+          $tag = '${{ needs.resolve.outputs.upstreamTag }}'
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+
+          # Determine which majors failed
+          $failedList = @()
+          $buildResult = '${{ needs.build.result }}'
+          if ($buildResult -eq 'failure') {
+            # Collect from matrix
+            $majors = '${{ needs.resolve.outputs.majorsJson }}' | ConvertFrom-Json
+            $failedList = @($majors)
+          }
+
+          $title = "Build failed: pglogical $version for PG majors: $($failedList -join ', ')"
+          $body = @"
+          Build for pglogical $version ($tag) failed.
+
+          - **Version:** $version
+          - **Upstream tag:** $tag
+          - **PostgreSQL majors:** $($failedList -join ', ')
+          - **Workflow run:** $runUrl
+
+          The build job failed. Check the run logs for details.
+          "@
+
+          # Check if a similar issue already exists
+          $existing = gh issue list --repo $env:GITHUB_REPOSITORY --search "$title" --state open --limit 1 --json number | ConvertFrom-Json
+          if ($existing.Count -eq 0) {
+            gh issue create --repo $env:GITHUB_REPOSITORY --title $title --body $body
+            Write-Host "Issue created for build failure."
+          }
+          else {
+            Write-Host "Similar issue already open (#$($existing[0].number)); skipping."
+          }
+
