@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: pg-versions-sync
@@ -93,16 +94,29 @@ jobs:
           }
           "candidateNewMajors=$eligibleJson" >> $env:GITHUB_OUTPUT
 
-      - name: Commit matrix update
+      - name: Open PR for matrix update
         if: steps.sync.outputs.configChanged == 'true'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add .github/pg-versions.json
           if git diff --cached --quiet; then
-            echo 'Matrix was reported changed but pg-versions.json is unchanged; skipping commit.'
+            echo 'Matrix was reported changed but pg-versions.json is unchanged; skipping PR.'
             exit 0
           fi
-          git commit -m 'PGL-001: Sync PostgreSQL version matrix'
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          # main is branch-protected (require PR + CI); the matrix update goes
+          # through review instead of a direct push.
+          if gh pr list --repo "$GITHUB_REPOSITORY" --state open --search 'sync PostgreSQL version matrix in:title' --json number --jq 'length' | grep -q '[1-9]'; then
+            echo 'An open matrix-sync PR already exists; skipping.'
+            exit 0
+          fi
+          BRANCH="matrix-sync/$(date -u +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH"
+          git commit -m 'chore: sync PostgreSQL version matrix'
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title 'chore: sync PostgreSQL version matrix' \
+            --body 'Automated daily matrix sync (pg.org versions.json + EDB availability). CI runs on this PR; review and merge.'

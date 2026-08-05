@@ -418,6 +418,37 @@ jobs:
         run: |
           gh release delete "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
 
+  set-latest:
+    # GitHub allows exactly ONE "Latest" release per repository. Parallel
+    # matrix publishes make the winner nondeterministic (last finisher), so
+    # after the whole batch succeeds, deterministically mark the highest
+    # PostgreSQL major's release as Latest.
+    name: Mark highest PG major release as latest
+    needs: [resolve, publish]
+    if: ${{ needs.resolve.outputs.majorsJson != '[]' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Mark latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          . ./scripts/common.ps1
+          $majors = '${{ needs.resolve.outputs.majorsJson }}' | ConvertFrom-Json
+          $maxMajor = ($majors | Measure-Object -Maximum).Maximum
+          $tag = Get-LocalReleaseTag `
+            -Version '${{ needs.resolve.outputs.version }}' `
+            -PackagingRevision ([int]'${{ needs.resolve.outputs.packagingRevision }}') `
+            -PgMajor "$maxMajor"
+          $releaseId = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" --jq '.id'
+          gh api -X PATCH "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" -f make_latest=true
+          Write-Host "Marked $tag as the latest release"
+
   report-failure:
     name: Report build failure
     needs: [resolve, build, publish]
