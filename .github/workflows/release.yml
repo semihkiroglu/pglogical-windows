@@ -2,9 +2,10 @@
 # upstream pglogical release, across all supported PostgreSQL majors.
 #
 # Reusable (workflow_call) and manually dispatchable (workflow_dispatch).
-# Never publishes partial results: a draft GitHub release is created only
-# after the build plan is valid, all assets are uploaded, and the release is
-# published only after every matrix build succeeded.
+# All matrix build jobs must succeed before any publish job starts
+# (publish `needs: build`). Publish jobs run per-major in parallel, so a
+# failure during a publish step can leave a partial set of published
+# releases; the report-failure job then opens an issue.
 #
 # Least-privilege permissions: contents: read everywhere except the publish
 # job, which needs contents: write for the release itself.

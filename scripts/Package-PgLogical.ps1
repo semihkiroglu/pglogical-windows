@@ -25,8 +25,9 @@
     directory. The upstream pglogical COPYRIGHT/LICENSE file is included in
     the ZIP when present in the source checkout.
 
-    The ZIP is deterministic per staging content; no PostgreSQL/EDB binaries
-    are bundled.
+    The ZIP content is determined by the staging directory; archive bytes are
+    not normalized (timestamps), so reproducibility is content-level, not
+    byte-for-byte. No PostgreSQL/EDB binaries are bundled.
 
 .PARAMETER StagingDir
     The staged package directory (lib/, share/, bin/).

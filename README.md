@@ -19,8 +19,9 @@ PostgreSQL Global Development Group.
   * `release.yml` — the full PostgreSQL 14–18 build matrix and release
     publication.
   * `pg-versions-sync.yml` — daily PostgreSQL version matrix sync.
-* One GitHub release per upstream pglogical release, with one ZIP per
-  PostgreSQL major and a `SHA256SUMS.txt`.
+* One GitHub release per PostgreSQL major, tagged
+  `pglogical-<version>-pg<major>-windows.<rev>` (e.g.
+  `pglogical-2.4.8-pg18-windows.1`), each with a ZIP and a `SHA256SUMS.txt`.
 * Local PowerShell tooling (`scripts/`) for building and testing on Windows.
 
 The upstream pglogical repository is never modified, forked, or vendored;
