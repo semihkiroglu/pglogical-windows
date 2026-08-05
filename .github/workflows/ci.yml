@@ -20,6 +20,10 @@ permissions:
 jobs:
   lint:
     name: Static validation (PowerShell, YAML, JSON, manifests)
+    # Fork PRs are untrusted (their workflow YAML runs in this repo context);
+    # run CI only for same-repo PRs and branch pushes. build-smoke skips along
+    # automatically because its condition reads the changes output.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-24.04
     outputs:
       baselineTag: ${{ steps.config.outputs.baselineTag }}
@@ -95,6 +99,7 @@ jobs:
   # ---------------------------------------------------------------------------
   changes:
     name: Detect whether build-relevant files changed
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-24.04
     outputs:
       build: ${{ steps.diff.outputs.build }}
