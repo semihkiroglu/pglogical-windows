@@ -283,9 +283,16 @@ install(TARGETS pglogical pglogical_output
         ARCHIVE DESTINATION lib)
 install(TARGETS pglogical_create_subscriber RUNTIME DESTINATION bin)
 install(FILES "${_generated_control}" DESTINATION share/extension)
-# All upstream extension SQL scripts and origin control file.
-install(DIRECTORY "${PGLOGICAL_SOURCE_DIR}/" DESTINATION share/extension
-        FILES_MATCHING PATTERN "*.sql" PATTERN "*.control")
+# Only the extension SQL scripts and the legacy origin control file belong in
+# share/extension. install(DIRECTORY ...) would drag the whole upstream source
+# tree in (compat*/docs/expected/internals-doc/sql/t/.git/pglogical_dump as
+# empty dirs + test SQL files), so select the files explicitly — mirroring the
+# upstream Makefile DATA list.
+file(GLOB _pglogical_sql "${PGLOGICAL_SOURCE_DIR}/pglogical--*.sql")
+list(APPEND _pglogical_sql
+     "${PGLOGICAL_SOURCE_DIR}/pglogical_origin.control"
+     "${PGLOGICAL_SOURCE_DIR}/pglogical_origin--1.0.0.sql")
+install(FILES ${_pglogical_sql} DESTINATION share/extension)
 
 # ---------------------------------------------------------------------------
 # 10. Post-build export verification hook (runs when dumpbin is on PATH)
