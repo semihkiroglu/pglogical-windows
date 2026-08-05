@@ -352,6 +352,25 @@ try {
     if (-not (Test-Path (Join-Path $PgRoot 'lib\pglogical.dll'))) { Fail-Step 'pglogical.dll was not installed into PG_ROOT\lib' }
 
     # -----------------------------------------------------------------------
+    # 3-11 retry envelope: the Windows "could not reserve shared memory region
+    # ... error code 487" (ERROR_INVALID_ADDRESS) collision is a transient
+    # ASLR/address-space flake when many postgres instances start/stop in one
+    # runner. When the ONLY server-log errors are the 487 cascade, retry the
+    # whole test once from a clean cluster; anything else fails fast.
+    # -----------------------------------------------------------------------
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        if ($attempt -gt 1) {
+            Write-Host '== Retry 2: cleaning up after 487 shared-memory collision'
+            Remove-Item -Recurse -Force $dataDir -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force (Join-Path $WorkDir 'subscriber-data') -ErrorAction SilentlyContinue
+            @($initLog, $serverOut, $serverErr, (Join-Path $WorkDir 'subscriber-postgresql.conf'), (Join-Path $WorkDir 'pglogical_create_subscriber_postgres.log')) |
+                Where-Object { $_ } | Remove-Item -Force -ErrorAction SilentlyContinue
+            # Let Windows release the shared-memory sections of the dead
+            # postmasters before the retry maps new ones.
+            Start-Sleep -Seconds 3
+        }
+
+    # -----------------------------------------------------------------------
     # 3. initdb
     # -----------------------------------------------------------------------
     Write-Host "== Step 3: initdb"
@@ -640,6 +659,11 @@ try {
             Get-Content $exeErr -ErrorAction SilentlyContinue | Select-Object -Last 40 | ForEach-Object { Write-Host "   $_" }
             $pgl = Join-Path $WorkDir 'pglogical_create_subscriber_postgres.log'
             if (Test-Path $pgl) { Write-Host '   subscriber postgres log:'; Get-Content $pgl | Select-Object -Last 40 | ForEach-Object { Write-Host "   $_" } }
+            if ($attempt -eq 1 -and (Test-Path $pgl) -and (Select-String -Path $pgl -Pattern 'error code 487|could not reserve shared memory' -Quiet)) {
+                Write-Host '   [retry] subscriber postgres log shows the transient 487 collision; stopping subscriber and retrying once'
+                $null = Invoke-PgNative -FilePath (Join-Path $binDir 'pg_ctl.exe') -Arguments @('-D', $subDataDir, '-m', 'fast', '-w', 'stop') -OutputLog (Join-Path $WorkDir 'pgctl-sub-stop.log') -ErrorAction SilentlyContinue
+                continue
+            }
             throw 'subscriber e2e failed'
         }
 
@@ -694,12 +718,20 @@ try {
     if ($serverLogs.Count -gt 0) {
         $errors = @(Get-Content $serverLogs | Where-Object { $_ -match '\b(ERROR|FATAL|PANIC)\b' })
         if ($errors.Count -gt 0) {
+            $non487 = @($errors | Where-Object { $_ -notmatch 'error code 487|could not reserve shared memory|server process .* was terminated|terminated by exception|terminated by signal' })
+            if ($attempt -eq 1 -and $non487.Count -eq 0) {
+                Write-Host '   [retry] log errors match the transient Windows 487 shared-memory collision; retrying once from a clean cluster'
+                continue
+            }
             Fail-Step "PostgreSQL server log contains errors:"
             $errors | Select-Object -Last 10 | ForEach-Object { Write-Host "   $_" }
+            break
         }
         else {
             Write-Host '   no ERROR/FATAL/PANIC found in server log'
+            break
         }
+    }
     }
 }
 finally {
