@@ -265,7 +265,8 @@ jobs:
           ./scripts/Test-PgLogical.ps1 `
             -PgRoot "${{ steps.install.outputs.pgRoot }}" `
             -StagingDir "${{ steps.build.outputs.stage }}" `
-            -UpstreamVersion "${{ needs.resolve.outputs.version }}"
+            -UpstreamVersion "${{ needs.resolve.outputs.version }}" `
+            -AllowTemporaryLocalUser
 
       - name: Package ZIP and checksum
         id: package
