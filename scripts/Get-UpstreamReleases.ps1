@@ -8,9 +8,21 @@
     Calls GET /repos/{owner}/{repo}/releases/latest (which excludes drafts
     and prereleases by definition), validates the tag against the configured
     pattern (^REL[0-9]+_[0-9]+_[0-9]+$), checks the configured baseline
-    (2.4.8), checks the expected local release tags, and emits a JSON build
-    plan listing the upstream version × PG major entries that are missing
-    locally.
+    (2.4.8), resolves the exact official EDB Windows x64 artifact for every
+    configured PostgreSQL major, compares it with the artifact recorded in
+    the latest local release for that version × major, and emits a JSON
+    build plan.
+
+    Plan semantics per version × major:
+      * no local release                          -> packaging revision 1
+      * local release records the same EDB
+        artifact filename as the resolved one     -> covered (no action)
+      * resolved artifact is newer (minor and/or
+        packaging revision)                       -> next packaging revision
+    The EDB identity is the trigger: a post-download SHA recalculation alone
+    never triggers a rebuild. Fail-closed: an unresolvable EDB artifact, an
+    unparseable recorded identity, or a resolved artifact OLDER than the one
+    recorded in the latest release aborts the plan with a clear error.
 
     If the latest release is already fully packaged locally, the plan is
     empty (successful no-op). A 404 from the API (meaning every release is a
@@ -143,43 +155,36 @@ else {
 Write-Host "Resolved $tag -> $commitSha"
 
 # ---------------------------------------------------------------------------
-# 4. Check local release tags and compute missing set (per PG major)
+# 4. Resolve the exact EDB artifact for every configured major (fail closed)
 # ---------------------------------------------------------------------------
 $majors = @($config.postgresqlMajors | Sort-Object { [int]$_ })
-
-$plan = @()
+$artifacts = [ordered]@{}
 foreach ($major in $majors) {
-    $localTag = Get-LocalReleaseTag -Version $version -PackagingRevision 1 -PgMajor $major
-    $alreadyPackaged = $false
-    try {
-        $encodedLocalTag = [uri]::EscapeDataString($localTag)
-        $null = Invoke-RestMethod `
-            -Uri "https://api.github.com/repos/$localOwner/releases/tags/$encodedLocalTag" `
-            -Headers (Get-GitHubHeaders) `
-            -Method Get
-        $alreadyPackaged = $true
+    $artifact = Resolve-EdbArtifact -Major $major
+    if (-not $artifact) {
+        throw "Cannot resolve the exact EDB Windows x64 binaries artifact for PostgreSQL $major (fail closed). Refusing to plan a release against an unknown artifact; check pg.org versions.json and get.enterprisedb.com availability."
     }
-    catch {
-        $statusCode = $null
-        if ($null -ne $_.Exception.Response) {
-            $statusCode = [int]$_.Exception.Response.StatusCode
-        }
-        if ($statusCode -ne 404) { throw }
-    }
-    if ($alreadyPackaged) {
-        Write-Host "Already packaged: $localTag (skipping)"
-        continue
-    }
-    $plan += [pscustomobject]@{
-        version           = $version
-        upstreamTag       = $tag
-        commitSha         = $commitSha
-        pgMajor           = $major
-        packagingRevision = 1
-        localTag          = $localTag
-    }
+    $artifacts[$major] = $artifact
+    Write-Host "PG $major exact EDB artifact: $($artifact.filename)"
 }
-$plan = @($plan | Sort-Object { [int]$_.pgMajor })
+
+# ---------------------------------------------------------------------------
+# 5. Fetch local releases for this version and compute the plan (per PG major)
+# ---------------------------------------------------------------------------
+$allReleases = @(Invoke-GitHubApi -Url "https://api.github.com/repos/$localOwner/releases")
+$localReleases = @($allReleases | Where-Object { -not $_.draft } | ForEach-Object {
+    [pscustomobject]@{ tag_name = [string]$_.tag_name; body = [string]$_.body }
+})
+Write-Host "Fetched $($localReleases.Count) local releases"
+
+$plan = @(Get-ReleasePlan `
+    -Version $version `
+    -UpstreamTag $tag `
+    -CommitSha $commitSha `
+    -Majors $majors `
+    -Artifacts $artifacts `
+    -LocalReleases $localReleases)
+$plan = @($plan | Sort-Object { [int]$_.postgresqlMajor })
 
 $result = [pscustomobject]@{
     generatedAt    = (Get-Date).ToUniversalTime().ToString('o')
@@ -204,7 +209,7 @@ if (-not $Quiet) {
     else {
         Write-Host "Build plan ($($plan.Count) missing release(s)):"
         foreach ($p in $plan) {
-            Write-Host "  $($p.version) [$($p.upstreamTag) @ $($p.commitSha)] -> $($p.localTag)"
+            Write-Host "  $($p.pglogicalVersion) [$($p.upstreamTag) @ $($p.upstreamCommitSha)] -> $($p.localTag) [EDB $($p.edbArtifactFilename)]"
         }
     }
 }

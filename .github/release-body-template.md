@@ -4,17 +4,25 @@
 | --- | --- |
 | pglogical version | {{VERSION}} |
 | Upstream repository | [{{UPSTREAM_REPO}}](https://github.com/{{UPSTREAM_REPO}}) |
-| Upstream release | [{{UPSTREAM_TAG}}](https://github.com/{{UPSTREAM_REPO}}/releases/tag/{{UPSTREAM_TAG}}) |
+| Upstream release tag | [{{UPSTREAM_TAG}}](https://github.com/{{UPSTREAM_REPO}}/releases/tag/{{UPSTREAM_TAG}}) |
 | Upstream commit SHA | `{{COMMIT_SHA}}` |
-| Packaging revision | windows.{{PACKAGING_REVISION}} |
-| PostgreSQL version | {{PG_MAJOR}} |
-| EDB binaries SHA-256 | `{{EDB_BINARIES_SHA256}}` |
+| Windows packaging revision | windows.{{PACKAGING_REVISION}} |
+| PostgreSQL compatibility major | {{PG_MAJOR}} |
+| PostgreSQL exact build version | {{PG_BUILD_VERSION}} |
+| EDB packaging revision | {{EDB_REVISION}} |
+| EDB binaries archive | `{{EDB_ARCHIVE}}` |
+| EDB binaries URL | <{{EDB_URL}}> |
+| EDB binaries SHA-256 (calculated post-download by this project, not a vendor-published checksum) | `{{EDB_BINARIES_SHA256}}` |
 | Architecture / configuration | x64 / Release |
 | Build workflow run | [{{RUN_URL}}]({{RUN_URL}}) |
 
+> **Note on the exact build input:** PostgreSQL.org versions.json determines the supported current `major.minor`. The EDB packaging revision is resolved by controlled probing of the EDB-controlled download host (heuristic availability discovery — not an authoritative EDB manifest); any network ambiguity fails closed. The artifact is pinned from planning through build, and the EDB archive SHA-256 is calculated by this project after download.
+
 ## Packages
 
-`pglogical-{{VERSION}}-pg{{PG_MAJOR}}-windows-x64.zip`
+`pglogical-{{VERSION}}-pg{{PG_MAJOR}}.{{PG_MINOR}}-edb{{EDB_REVISION}}-windows-x64.zip`
+
+The package ZIP name and the embedded `BUILD-INFO.json` identify the exact PostgreSQL build version and EDB packaging revision; the GitHub release tag represents the PostgreSQL compatibility major release stream.
 
 Unzip into a matching PostgreSQL installation directory (e.g. `C:\Program Files\PostgreSQL\{{PG_MAJOR}}`) so that `lib\`, `share\extension\`, and `bin\` merge with the existing layout. Install on both provider and subscriber nodes.
 

@@ -54,14 +54,6 @@ function Get-NormalizedMajorList {
     return @($normalized | Sort-Object { [int]$_ })
 }
 
-function Test-VersionSyncEdbBinaryUrl {
-    param(
-        [Parameter(Mandatory = $true)][string]$Url
-    )
-
-    return Test-EdbBinaryUrl -Url $Url
-}
-
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path (Get-RepoRoot) '.github/pg-versions.json'
 }
@@ -155,10 +147,15 @@ foreach ($major in @($versionsByMajor.Keys | Sort-Object { [int]$_ })) {
     }
 
     $minor = [string]$entry.latestMinor
-    $url = Get-EdbBinaryUrl -Major $major -Minor $minor
-    $isAvailable = Test-VersionSyncEdbBinaryUrl -Url $url
+    # Availability means an exact EDB artifact (including its packaging
+    # revision) can be resolved on the official EDB host. Never assume
+    # revision -1.
+    $artifact = Resolve-EdbArtifact -Major $major -Minor $minor
+    $isAvailable = $null -ne $artifact
+    $url = if ($artifact) { $artifact.url } else { Get-EdbBinaryUrl -Major $major -Minor $minor }
     if ($isAvailable) {
         $null = $availableMajors.Add($major)
+        Write-Host "PG $major exact artifact available: $($artifact.filename)"
     }
 
     if ($configuredSet.Contains($major)) {

@@ -96,6 +96,19 @@ jobs:
           Write-Host "Baseline upstream tag from config: $baselineTag"
           "baselineTag=$baselineTag" >> $env:GITHUB_OUTPUT
 
+  tests:
+    name: PowerShell unit tests
+    # Same trust boundary as the other jobs: fork PRs never run our CI.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Run unit tests
+        shell: pwsh
+        run: ./tests/run-tests.ps1
+
   # ---------------------------------------------------------------------------
   # Change detection: skip expensive Windows build for doc-only changes
   # ---------------------------------------------------------------------------
