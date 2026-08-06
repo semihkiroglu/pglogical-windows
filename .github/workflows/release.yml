@@ -478,6 +478,16 @@ jobs:
             --title "pglogical $('${{ needs.resolve.outputs.version }}') — PostgreSQL ${{ matrix.entry.postgresqlMajor }} (built against ${{ matrix.entry.postgresqlBuildVersion }}, EDB revision ${{ matrix.entry.edbPackagingRevision }}) — windows.$('${{ matrix.entry.windowsPackagingRevision }}')" `
             --notes-file release-body.md
 
+      - name: Upload release assets
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="${{ steps.tag.outputs.releaseTag }}"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" artifacts/*.zip artifacts/SHA256SUMS.txt
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
+
       - name: Generate artifact attestation
         if: steps.existing.outputs.exists == 'false'
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
@@ -524,7 +534,9 @@ jobs:
           . ./scripts/common.ps1
           $config = Import-VersionConfig
           $majors = @($config.postgresqlMajors | ForEach-Object { [string]$_ })
-          $releases = @(gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate --jq '.[] | {tag_name, draft, prerelease}')
+          # gh api --jq emits one JSON document per release; ConvertFrom-Json
+          # turns the stream into release objects before selection.
+          $releases = @(gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate --jq '.[] | {tag_name, draft, prerelease}' | ConvertFrom-Json)
           $tag = Select-LatestRelease -Version $env:VERSION -Majors $majors -Releases $releases
           if (-not $tag) { throw "No published release found for pglogical $env:VERSION; cannot select Latest." }
           $releaseId = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" --jq '.id'
