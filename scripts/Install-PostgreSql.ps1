@@ -5,14 +5,17 @@
 
 .DESCRIPTION
     Downloads the official EDB "binaries" ZIP
-    (postgresql-<major>.<minor>-1-windows-x64-binaries.zip) from
+    (postgresql-<major>.<minor>-<revision>-windows-x64-binaries.zip) from
     get.enterprisedb.com (the EnterpriseDB-controlled download host), expands
     it into an isolated directory, and validates the layout and version.
 
-    The minor version and binaries URL are derived from
-    https://www.postgresql.org/versions.json (the authoritative source for
-    latest supported minors). When -Minor and -BinariesUrl are both provided,
-    they take precedence over pg.org derivation.
+    The minor version comes from https://www.postgresql.org/versions.json
+    (the authoritative source for latest supported minors). The exact EDB
+    packaging revision is resolved by probing the official EDB host in
+    ascending order and taking the highest revision that exists; revision -1
+    is never silently assumed, because EDB can republish the same minor under
+    a new packaging revision. When -Minor and -BinariesUrl are both provided,
+    they take precedence over derivation.
 
     Why this source?
       * The ZIP is produced by the same build that the official EDB Windows
@@ -83,21 +86,25 @@ if ($majorKey -notin @($config.postgresqlMajors)) {
     throw "PostgreSQL major $Major is not configured in .github/pg-versions.json. Configured majors: $known. Adding a major is a deliberate configuration change."
 }
 
-# Resolve minor + binariesUrl: explicit params > pg.org derivation
+# Resolve minor + exact binaries URL: explicit params > resolution
 if ($Minor -and $BinariesUrl) {
     Write-Host "Using explicit minor=$Minor binariesUrl=$BinariesUrl"
 }
 elseif ($Minor) {
-    $BinariesUrl = Get-EdbBinaryUrl -Major $majorKey -Minor $Minor
-    Write-Host "Using explicit minor=$Minor, derived URL: $BinariesUrl"
+    $artifact = Resolve-EdbArtifact -Major $majorKey -Minor $Minor
+    if (-not $artifact) {
+        throw "Could not resolve an exact EDB Windows binaries artifact for PostgreSQL $Major.$Minor on get.enterprisedb.com; refusing to guess a packaging revision (fail closed). Specify -BinariesUrl explicitly if the artifact is known."
+    }
+    $BinariesUrl = $artifact.url
+    Write-Host "Using explicit minor=$Minor, resolved exact artifact: $($artifact.filename)"
 }
 else {
-    $result = Get-PgLatestMinor -Major $majorKey
-    if (-not $result) {
-        throw "Could not resolve latest minor for PostgreSQL $Major from versions.json. Specify -Minor and -BinariesUrl explicitly, or ensure the major is present and supported in pg.org data."
+    $artifact = Resolve-EdbArtifact -Major $majorKey
+    if (-not $artifact) {
+        throw "Could not resolve the exact EDB Windows binaries artifact for PostgreSQL $Major from versions.json and get.enterprisedb.com. Specify -Minor and -BinariesUrl explicitly, or ensure the major is present and supported in pg.org data."
     }
-    $Minor = $result.minor
-    $BinariesUrl = $result.binariesUrl
+    $Minor = $artifact.minor
+    $BinariesUrl = $artifact.url
 }
 
 $url = $BinariesUrl
@@ -207,8 +214,11 @@ if (-not $verLine) { throw 'Could not read PG_VERSION from pg_config.h' }
 $installedVersion = $verLine.Matches[0].Groups[1].Value
 $installedNum = [int]$verNumLine.Matches[0].Groups[1].Value
 $expectedMajor = [int]$majorKey
-if ([math]::Floor($installedNum / 10000) -ne $expectedMajor) {
-    throw "Installed PostgreSQL major ($installedVersion, PG_VERSION_NUM $installedNum) does not match requested major $majorKey"
+$expectedMinor = [int]$Minor
+$installedMajor = [math]::Floor($installedNum / 10000)
+$installedMinor = $installedNum % 10000
+if ($installedMajor -ne $expectedMajor -or $installedMinor -ne $expectedMinor) {
+    throw "Installed PostgreSQL version ($installedVersion, PG_VERSION_NUM $installedNum) does not match the requested artifact PostgreSQL $expectedMajor.$expectedMinor"
 }
 
 Write-Host "PostgreSQL $installedVersion installed at:"

@@ -42,11 +42,15 @@
     Use an existing upstream checkout instead of cloning (implies -SkipClone).
 
 .PARAMETER ExpectedCommitSha
-    When non-empty, verifies that the cloned commit SHA matches this exact
-    value. Used in release builds to detect tag movement (the resolve job
-    computes the expected SHA from the upstream release). Passing an empty
-    string (the default) skips the verification — this is the behavior for
-    CI build-smoke, which does not resolve a SHA.
+    When non-empty, verifies that the final resolved checkout's commit SHA
+    matches this exact value. The verification runs for BOTH supplied
+    checkouts (-SourceDir, implying -SkipClone) and freshly cloned ones, so
+    a caller-supplied checkout can never bypass the check. Both SHAs are
+    trimmed and compared case-insensitively; a mismatch fails immediately.
+    Used in release builds to detect tag movement (the resolve job computes
+    the expected SHA from the upstream release). Passing an empty string
+    (the default) skips the verification — this is the behavior for CI
+    build-smoke, which does not resolve a SHA.
 
 .PARAMETER SkipClone
     Do not clone upstream; requires -SourceDir.
@@ -115,28 +119,13 @@ if ($Configuration -ne 'Release') { Write-Host "Building $Configuration (Release
 if (-not $WorkDir) { $WorkDir = Join-Path $repoRoot ".build\$UpstreamTag" }
 $null = New-Item -ItemType Directory -Force -Path $WorkDir
 
-if ($SourceDir) {
-    $SourceDir = [System.IO.Path]::GetFullPath($SourceDir)
-    if (-not (Test-Path (Join-Path $SourceDir 'Makefile'))) { throw "-SourceDir does not look like a pglogical checkout: $SourceDir" }
-}
-elseif (-not $SkipClone) {
-    $SourceDir = Join-Path $WorkDir 'upstream'
-    if (Test-Path (Join-Path $SourceDir '.git')) {
-        Write-Host "Reusing existing clone at $SourceDir (delete it to force a fresh clone)"
-    }
-    else {
-        Write-Host "Cloning $UpstreamRepository at tag $UpstreamTag"
-        Invoke-Native -FilePath 'git' -ArgumentList @('clone', '--depth', '1', '--branch', $UpstreamTag, "https://github.com/$UpstreamRepository.git", $SourceDir)
-    }
-    $headSha = (& git -C $SourceDir rev-parse HEAD 2>$null)
-    Write-Host "Upstream commit: $headSha"
-    if ($ExpectedCommitSha -and ($ExpectedCommitSha -ne $headSha)) {
-        throw "Upstream tag $UpstreamTag moved: expected commit $ExpectedCommitSha, clone HEAD is $headSha"
-    }
-}
-else {
-    throw 'Either -SourceDir or -SkipClone without -SourceDir requires an existing checkout.'
-}
+$SourceDir = Resolve-UpstreamSource `
+    -UpstreamRepository $UpstreamRepository `
+    -UpstreamTag $UpstreamTag `
+    -WorkDir $WorkDir `
+    -SourceDir $SourceDir `
+    -SkipClone:$SkipClone `
+    -ExpectedCommitSha $ExpectedCommitSha
 
 $upstreamVersion = ConvertTo-PgLogicalVersion -Tag $UpstreamTag
 

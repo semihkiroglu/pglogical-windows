@@ -24,8 +24,9 @@ PostgreSQL Global Development Group.
   `pglogical-2.4.8-pg18-windows.1`), each with a ZIP and a `SHA256SUMS.txt`.
 * Local PowerShell tooling (`scripts/`) for building and testing on Windows.
 
-The upstream pglogical repository is never modified, forked, or vendored;
-every build clones the exact upstream release tag.
+The upstream repository is not forked or vendored. Any Windows-specific
+patches are applied only to the ephemeral build checkout. Every build
+clones the exact upstream release tag.
 
 ## Supported versions
 

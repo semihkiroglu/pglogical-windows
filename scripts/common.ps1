@@ -209,6 +209,234 @@ function Get-LocalReleaseTag {
     return "pglogical-$Version-pg$PgMajor-windows.$PackagingRevision"
 }
 
+function Resolve-UpstreamSource {
+    <#
+    .SYNOPSIS
+        Resolves the upstream pglogical checkout directory for a release tag,
+        cloning it when -SourceDir is not supplied, and verifies
+        -ExpectedCommitSha against the final resolved checkout whenever it is
+        provided.
+
+    .DESCRIPTION
+        The expected-SHA verification runs for BOTH supplied checkouts
+        (-SourceDir, implying -SkipClone) and freshly cloned ones: the caller
+        must never build from a checkout whose HEAD differs from the resolved
+        upstream commit. The expected and actual SHAs are trimmed and compared
+        case-insensitively; a mismatch fails immediately with an actionable
+        error naming both values.
+
+    .PARAMETER UpstreamRepository
+        Upstream repository in owner/name form, e.g. 2ndQuadrant/pglogical.
+
+    .PARAMETER UpstreamTag
+        Upstream release tag to clone, e.g. REL2_4_8.
+
+    .PARAMETER WorkDir
+        Directory the clone is created under (upstream/ subdirectory).
+        Required when cloning.
+
+    .PARAMETER SourceDir
+        Use an existing checkout instead of cloning (implies -SkipClone).
+
+    .PARAMETER CloneUrl
+        Clone URL override. Defaults to
+        https://github.com/<UpstreamRepository>.git; used by the unit tests
+        to clone from a local fixture repository.
+
+    .PARAMETER ExpectedCommitSha
+        When non-empty, the resolved checkout's HEAD must match this exact
+        commit SHA. Empty (the default) skips verification, preserving the
+        CI build-smoke behavior.
+
+    .PARAMETER SkipClone
+        Do not clone upstream; requires -SourceDir.
+
+    .OUTPUTS
+        The resolved absolute SourceDir.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$UpstreamRepository,
+        [Parameter(Mandatory = $true)][string]$UpstreamTag,
+        [string]$WorkDir,
+        [string]$SourceDir,
+        [string]$CloneUrl,
+        [string]$ExpectedCommitSha = '',
+        [switch]$SkipClone
+    )
+
+    if ($SourceDir) {
+        $SourceDir = [System.IO.Path]::GetFullPath($SourceDir)
+        if (-not (Test-Path (Join-Path $SourceDir 'Makefile'))) { throw "-SourceDir does not look like a pglogical checkout: $SourceDir" }
+    }
+    elseif (-not $SkipClone) {
+        if (-not $WorkDir) { throw 'WorkDir is required when cloning upstream.' }
+        $SourceDir = Join-Path $WorkDir 'upstream'
+        if (Test-Path (Join-Path $SourceDir '.git')) {
+            Write-Host "Reusing existing clone at $SourceDir (delete it to force a fresh clone)"
+        }
+        else {
+            if (-not $CloneUrl) { $CloneUrl = "https://github.com/$UpstreamRepository.git" }
+            $gitExe = (Get-Command git -ErrorAction SilentlyContinue).Source
+            if (-not $gitExe) { throw 'git executable not found on PATH; required to clone the upstream source.' }
+            Write-Host "Cloning $UpstreamRepository at tag $UpstreamTag"
+            Invoke-Native -FilePath $gitExe -ArgumentList @('clone', '--depth', '1', '--branch', $UpstreamTag, $CloneUrl, $SourceDir)
+        }
+    }
+    else {
+        throw 'Either -SourceDir or -SkipClone without -SourceDir requires an existing checkout.'
+    }
+
+    if ($ExpectedCommitSha) {
+        $expected = $ExpectedCommitSha.Trim()
+        $headSha = (& git -C $SourceDir rev-parse HEAD 2>$null)
+        if ($null -eq $headSha -or [string]::IsNullOrWhiteSpace($headSha)) {
+            throw "Could not read HEAD commit from $SourceDir via 'git rev-parse HEAD'; expected commit $expected for upstream tag $UpstreamTag."
+        }
+        $headSha = $headSha.Trim()
+        if (-not [string]::Equals($headSha, $expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Upstream commit mismatch for tag ${UpstreamTag}: expected commit $expected but checkout HEAD is $headSha. The upstream tag may have moved; re-resolve the upstream release before building."
+        }
+        Write-Host "Upstream commit verified: $headSha"
+    }
+    else {
+        $headSha = (& git -C $SourceDir rev-parse HEAD 2>$null)
+        if ($headSha) { Write-Host "Upstream commit: $($headSha.Trim())" }
+    }
+    return $SourceDir
+}
+
+function Get-ReleasePlan {
+    <#
+    .SYNOPSIS
+        Computes the idempotent release plan for one upstream pglogical
+        version across the configured PostgreSQL majors, taking the exact
+        EDB artifact identity into account.
+
+    .DESCRIPTION
+        For every major:
+          * No local release for (version, major)  -> plan windows.1.
+          * The latest local release records the same EDB artifact filename
+            as the currently resolved artifact -> covered, no action.
+          * The resolved artifact differs -> plan the next packaging
+            revision (highest existing revision + 1) for that major only.
+        Fail-closed conditions (throw, no partial plan):
+          * A major has no resolved EDB artifact identity.
+          * The latest local release records no EDB artifact filename.
+          * The resolved artifact is OLDER (minor/revision tuple) than the
+            artifact the latest release was built from.
+
+    .PARAMETER Version
+        Upstream pglogical version, e.g. 2.4.8.
+
+    .PARAMETER UpstreamTag
+        Upstream release tag, e.g. REL2_4_8.
+
+    .PARAMETER CommitSha
+        Resolved upstream commit SHA for the tag.
+
+    .PARAMETER Majors
+        Configured PostgreSQL majors to consider.
+
+    .PARAMETER Artifacts
+        IDictionary mapping major -> resolved EDB artifact identity
+        (as returned by Resolve-EdbArtifact).
+
+    .PARAMETER LocalReleases
+        Local repository releases (objects with .tag_name and .body).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$UpstreamTag,
+        [Parameter(Mandatory = $true)][string]$CommitSha,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Majors,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Artifacts,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$LocalReleases
+    )
+
+    $versionPattern = "^pglogical-$([regex]::Escape($Version))-pg([0-9]+)-windows\.([0-9]+)$"
+    $byMajor = @{}
+    foreach ($release in $LocalReleases) {
+        $m = [regex]::Match([string]$release.tag_name, $versionPattern)
+        if (-not $m.Success) { continue }
+        $major = $m.Groups[1].Value
+        if (-not $byMajor.ContainsKey($major)) {
+            $byMajor[$major] = [System.Collections.Generic.List[object]]::new()
+        }
+        $byMajor[$major].Add([pscustomobject]@{
+            tag_name = [string]$release.tag_name
+            body     = [string]$release.body
+            revision = [int]$m.Groups[2].Value
+        })
+    }
+
+    $plan = [System.Collections.Generic.List[object]]::new()
+    foreach ($major in @($Majors | Sort-Object { [int]$_ })) {
+        $key = [string]$major
+        $artifact = $Artifacts[$key]
+        if (-not $artifact) {
+            throw "Cannot plan a release for PostgreSQL ${key}: no exact EDB artifact identity was resolved (fail closed)."
+        }
+        if (-not $artifact.filename -or -not $artifact.url) {
+            throw "Cannot plan a release for PostgreSQL ${key}: the resolved EDB artifact identity is incomplete (filename/url missing; fail closed)."
+        }
+
+        $existing = @($byMajor[$key] | Sort-Object revision)
+        if ($existing.Count -eq 0) {
+            Write-Host "No local release for pglogical $Version / PostgreSQL $key; planning windows.1 against $($artifact.filename)"
+            $plan.Add([pscustomobject]@{
+                version             = $Version
+                upstreamTag         = $UpstreamTag
+                commitSha           = $CommitSha
+                pgMajor             = $key
+                packagingRevision   = 1
+                localTag            = Get-LocalReleaseTag -Version $Version -PackagingRevision 1 -PgMajor $key
+                edbArtifactFilename = $artifact.filename
+                edbArtifactUrl      = $artifact.url
+                edbMinor            = $artifact.minor
+                edbRevision         = $artifact.revision
+            })
+            continue
+        }
+
+        $newest = $existing[-1]
+        $recordedFilename = Get-EdbArtifactFromReleaseBody -Body $newest.body
+        if (-not $recordedFilename) {
+            throw "Release $($newest.tag_name) for pglogical $Version / PostgreSQL $key records no EDB binaries archive filename; cannot verify EDB artifact coverage. Recreate the release with the current release tooling (fail closed)."
+        }
+        if ($recordedFilename -eq $artifact.filename) {
+            Write-Host "Already packaged against the current EDB artifact: $($newest.tag_name) ($recordedFilename)"
+            continue
+        }
+
+        $recordedInfo = ConvertFrom-EdbArtifactFilename -Filename $recordedFilename
+        $resolvedInfo = ConvertFrom-EdbArtifactFilename -Filename $artifact.filename
+        if (-not $recordedInfo -or -not $resolvedInfo) {
+            throw "Cannot parse EDB artifact identities (recorded '$recordedFilename' in $($newest.tag_name), resolved '$($artifact.filename)'); refusing to plan a rebuild (fail closed)."
+        }
+        $recordedMinor = [int]$recordedInfo.minor
+        $resolvedMinor = [int]$resolvedInfo.minor
+        if ($resolvedMinor -lt $recordedMinor -or ($resolvedMinor -eq $recordedMinor -and $resolvedInfo.revision -lt $recordedInfo.revision)) {
+            throw "Resolved EDB artifact $($artifact.filename) is older than the artifact recorded in $($newest.tag_name) ($recordedFilename); refusing to rebuild against an older artifact (fail closed)."
+        }
+
+        $nextRevision = [int](($existing | Measure-Object -Property revision -Maximum).Maximum + 1)
+        Write-Host "EDB artifact changed for pglogical $Version / PostgreSQL ${key}: $recordedFilename -> $($artifact.filename); planning windows.$nextRevision"
+        $plan.Add([pscustomobject]@{
+            version             = $Version
+            upstreamTag         = $UpstreamTag
+            commitSha           = $CommitSha
+            pgMajor             = $key
+            packagingRevision   = $nextRevision
+            localTag            = Get-LocalReleaseTag -Version $Version -PackagingRevision $nextRevision -PgMajor $key
+            edbArtifactFilename = $artifact.filename
+            edbArtifactUrl      = $artifact.url
+            edbMinor            = $artifact.minor
+            edbRevision         = $artifact.revision
+        })
+    }
+    return @($plan)
+}
+
 # ---------------------------------------------------------------------------
 # GitHub API access (token from environment, no secrets on disk)
 # ---------------------------------------------------------------------------
@@ -287,13 +515,15 @@ function Get-PgOrgVersions {
 function Get-EdbBinaryUrl {
     <#
     .SYNOPSIS
-        Derives the EDB Windows binaries URL for a given major + minor.
+        Derives the EDB Windows binaries URL for a given major + minor +
+        packaging revision.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Major,
-        [Parameter(Mandatory = $true)][string]$Minor
+        [Parameter(Mandatory = $true)][string]$Minor,
+        [ValidateRange(1, 50)][int]$Revision = 1
     )
-    return "https://get.enterprisedb.com/postgresql/postgresql-$Major.$Minor-1-windows-x64-binaries.zip"
+    return "https://get.enterprisedb.com/postgresql/postgresql-$Major.$Minor-$Revision-windows-x64-binaries.zip"
 }
 
 function Test-EdbBinaryUrl {
@@ -313,37 +543,126 @@ function Test-EdbBinaryUrl {
     }
 }
 
-function Get-PgLatestMinor {
+function Resolve-EdbArtifact {
     <#
     .SYNOPSIS
-        Returns the latest supported minor version and derived EDB URL for a
-        PostgreSQL major. Sources versions.json live, finds the
-        matching major, and HEAD-probes the derived URL to confirm
-        availability (EDB binaries may lag pg.org by days).
+        Resolves the current exact EDB Windows x64 binaries artifact for a
+        PostgreSQL major from the official EDB host (get.enterprisedb.com).
+
+    .DESCRIPTION
+        The minor version comes from https://www.postgresql.org/versions.json
+        (the authoritative source for latest supported minors). The exact
+        packaging revision is then resolved by HEAD-probing
+        get.enterprisedb.com in ascending order and taking the highest
+        revision that exists. Revision -1 is never silently assumed: EDB can
+        republish the same minor under a new packaging revision (e.g.
+        postgresql-18.4-1 -> postgresql-18.4-2), and the extension must be
+        built against the exact artifact whose headers/import libraries are
+        used. No third-party package manifest is consulted.
+
+    .PARAMETER Major
+        PostgreSQL major, e.g. 18.
+
+    .PARAMETER Minor
+        Optional explicit minor. When omitted, derived from pg.org
+        versions.json (latestMinor for the major).
+
+    .PARAMETER MaxRevision
+        Upper bound for the revision enumeration. Revisions above this are
+        never considered.
 
     .OUTPUTS
-        A PSCustomObject with .minor (string) and .binariesUrl (string), or
-        $null if the major is not found or the URL is not yet reachable.
+        A PSCustomObject with .major, .minor, .revision, .filename and .url,
+        or $null when no artifact exists (callers fail closed).
     #>
     param(
-        [Parameter(Mandatory = $true)][string]$Major
+        [Parameter(Mandatory = $true)][string]$Major,
+        [string]$Minor,
+        [ValidateRange(1, 50)][int]$MaxRevision = 10
     )
-    $versions = Get-PgOrgVersions
-    $entry = @($versions | Where-Object { [string]$_.major -eq $Major } | Select-Object -First 1)
-    if (-not $entry) {
-        Write-Host "PostgreSQL major $Major not found in versions.json"
-        return $null
+    if (-not $Minor) {
+        $versions = Get-PgOrgVersions
+        $entry = @($versions | Where-Object { [string]$_.major -eq $Major } | Select-Object -First 1)
+        if (-not $entry) {
+            Write-Host "PostgreSQL major $Major not found in versions.json"
+            return $null
+        }
+        $Minor = [string]$entry[0].latestMinor
     }
-    $minor = [string]$entry[0].latestMinor
-    $url = Get-EdbBinaryUrl -Major $Major -Minor $minor
-    Write-Host "PG $Major latest minor: $minor, derived URL: $url"
 
-    # HEAD-probe to confirm EDB has the binaries (they lag pg.org).
-    if (-not (Test-EdbBinaryUrl -Url $url)) {
-        Write-Host "EDB binaries not yet available at $url (HEAD returned non-2xx); cannot use PG $Major.$minor"
+    $resolved = $null
+    for ($revision = 1; $revision -le $MaxRevision; $revision++) {
+        $url = Get-EdbBinaryUrl -Major $Major -Minor $Minor -Revision $revision
+        if (Test-EdbBinaryUrl -Url $url) {
+            $resolved = [pscustomobject]@{
+                major    = $Major
+                minor    = $Minor
+                revision = $revision
+                filename = [System.IO.Path]::GetFileName([Uri]$url)
+                url      = $url
+            }
+            Write-Host "EDB artifact revision $revision available: $($resolved.filename)"
+        }
+        else {
+            Write-Host "EDB artifact revision $revision not available: $url"
+            break
+        }
+    }
+    if (-not $resolved) {
+        Write-Host "No EDB Windows x64 binaries artifact found for PostgreSQL $Major.$Minor on get.enterprisedb.com (no revision responded; probed ascending from revision 1)."
         return $null
     }
-    return [pscustomobject]@{ minor = $minor; binariesUrl = $url }
+
+    # Defense in depth: the resolved artifact must belong to the requested
+    # PostgreSQL major before anything is built against it.
+    $parsed = ConvertFrom-EdbArtifactFilename -Filename $resolved.filename
+    if (-not $parsed -or $parsed.major -ne $Major) {
+        throw "Resolved EDB artifact $($resolved.filename) does not belong to PostgreSQL major $Major; refusing to use it (fail closed)."
+    }
+    return $resolved
+}
+
+function ConvertFrom-EdbArtifactFilename {
+    <#
+    .SYNOPSIS
+        Parses an EDB Windows x64 binaries filename of the form
+        postgresql-<major>.<minor>-<revision>-windows-x64-binaries.zip into
+        its components. Returns $null when the filename does not match.
+    #>
+    param([string]$Filename)
+    if ([string]::IsNullOrWhiteSpace($Filename)) { return $null }
+    $m = [regex]::Match($Filename.Trim(), '^postgresql-([0-9]+)\.([0-9]+)-([0-9]+)-windows-x64-binaries\.zip$')
+    if (-not $m.Success) { return $null }
+    return [pscustomobject]@{
+        major    = $m.Groups[1].Value
+        minor    = $m.Groups[2].Value
+        revision = [int]$m.Groups[3].Value
+    }
+}
+
+function Get-EdbArtifactFromReleaseBody {
+    <#
+    .SYNOPSIS
+        Extracts the EDB binaries archive filename recorded in a release
+        body. Accepts both the current provenance row ("EDB binaries
+        archive") and the legacy row ("EDB binaries SHA-256" whose value
+        embeds "<sha256>  <filename>"). Returns $null when neither row
+        records a filename.
+    #>
+    param([string]$Body)
+    if ([string]::IsNullOrWhiteSpace($Body)) { return $null }
+    foreach ($line in ($Body -split '\r?\n')) {
+        if ($line -match '^\|\s*EDB binaries archive\s*\|\s*`([^`]+)`\s*\|') {
+            return $matches[1].Trim()
+        }
+    }
+    foreach ($line in ($Body -split '\r?\n')) {
+        if ($line -match '^\|\s*EDB binaries SHA-256\s*\|\s*`([^`]+)`\s*\|') {
+            $tokens = @($matches[1].Trim() -split '\s+')
+            if ($tokens.Count -ge 2) { return $tokens[-1].Trim() }
+        }
+    }
+    return $null
 }
 
 function Invoke-InVsEnv {

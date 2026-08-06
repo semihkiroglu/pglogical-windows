@@ -8,7 +8,9 @@
 | Upstream commit SHA | `{{COMMIT_SHA}}` |
 | Packaging revision | windows.{{PACKAGING_REVISION}} |
 | PostgreSQL version | {{PG_MAJOR}} |
-| EDB binaries SHA-256 | `{{EDB_BINARIES_SHA256}}` |
+| EDB binaries archive | `{{EDB_ARCHIVE}}` |
+| EDB binaries URL | <{{EDB_URL}}> |
+| EDB binaries SHA-256 (calculated post-download by this project, not a vendor-published checksum) | `{{EDB_BINARIES_SHA256}}` |
 | Architecture / configuration | x64 / Release |
 | Build workflow run | [{{RUN_URL}}]({{RUN_URL}}) |
 

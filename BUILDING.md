@@ -69,14 +69,16 @@ order documented by EDB for Visual Studio builds:
 ### Option B: isolated download (recommended)
 
 `scripts/Install-PostgreSql.ps1` downloads the official EDB "binaries" ZIP
-(`postgresql-<major>.<minor>-1-windows-x64-binaries.zip`) from
+(`postgresql-<major>.<minor>-<revision>-windows-x64-binaries.zip`) from
 `get.enterprisedb.com` (the EnterpriseDB-controlled host). The minor
 version is derived automatically from
 `https://www.postgresql.org/versions.json` (the authoritative source for
-latest supported minors), so you never need to look up or pin minor
-versions manually. The download is verified (TLS, content length, ZIP
-integrity, version match), and expanded into an isolated directory without
-touching the system:
+latest supported minors), and the exact EDB packaging revision is resolved
+by probing the official host (revision `-1` is never silently assumed), so
+you never need to look up or pin minor versions or revisions manually. The
+download is verified (TLS, content length, ZIP integrity, major + minor
+version match), and expanded into an isolated directory without touching
+the system:
 
 ```powershell
 .\scripts\Install-PostgreSql.ps1 -Major 18
@@ -87,7 +89,7 @@ If you need a specific minor version (e.g. for reproducible local builds),
 pass `-Minor` and `-BinariesUrl` explicitly:
 
 ```powershell
-.\scripts\Install-PostgreSql.ps1 -Major 18 -Minor 4 -BinariesUrl "https://get.enterprisedb.com/postgresql/postgresql-18.4-1-windows-x64-binaries.zip"
+.\scripts\Install-PostgreSql.ps1 -Major 18 -Minor 4 -BinariesUrl "https://get.enterprisedb.com/postgresql/postgresql-18.4-2-windows-x64-binaries.zip"
 ```
 
 > **Checksums:** EDB does not publish an official checksum for the binaries

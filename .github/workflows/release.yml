@@ -1,5 +1,9 @@
 # release.yml — builds and publishes Windows x64 packages for one
 # upstream pglogical release, across all supported PostgreSQL majors.
+# The resolve job pins the exact official EDB artifact (including its
+# packaging revision) for every major; builds link against that exact
+# distribution and the release body records its filename, URL, and the
+# calculated post-download SHA-256.
 #
 # Reusable (workflow_call) and manually dispatchable (workflow_dispatch).
 # All matrix build jobs must succeed before any publish job starts
@@ -76,6 +80,7 @@ jobs:
       majorsJson: ${{ steps.resolve.outputs.majorsJson }}
       upstreamTag: ${{ steps.resolve.outputs.upstreamTag }}
       packagingRevision: ${{ steps.resolve.outputs.packagingRevision }}
+      edbArtifactsJson: ${{ steps.resolve.outputs.edbArtifactsJson }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -165,6 +170,22 @@ jobs:
           }
           "majorsJson=$majorsJson" >> $env:GITHUB_OUTPUT
 
+          # Resolve the exact official EDB artifact (major/minor, packaging
+          # revision, filename, URL) for every feasible major. The build
+          # links against the headers/import libraries of this exact
+          # distribution, so an unresolvable artifact fails the whole run.
+          $edbArtifacts = [ordered]@{}
+          foreach ($m in $majors) {
+            $artifact = Resolve-EdbArtifact -Major $m
+            if (-not $artifact) {
+              throw "Cannot resolve the exact EDB Windows x64 binaries artifact for PostgreSQL $m; refusing to build (fail closed)."
+            }
+            $edbArtifacts[$m] = $artifact
+            Write-Host "PG $m exact EDB artifact: $($artifact.filename)"
+          }
+          $edbArtifactsJson = $edbArtifacts | ConvertTo-Json -Compress
+          "edbArtifactsJson=$edbArtifactsJson" >> $env:GITHUB_OUTPUT
+
   build:
     name: Build + smoke test (PostgreSQL ${{ matrix.pgMajor }})
     needs: resolve
@@ -187,13 +208,18 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: .pg-cache
-          key: pg-binaries-${{ matrix.pgMajor }}-${{ hashFiles('.github/pg-versions.json') }}
+          # The cache key includes the exact EDB artifact filename so a
+          # different packaging revision can never reuse the wrong cached ZIP.
+          key: pg-binaries-${{ matrix.pgMajor }}-${{ fromJson(needs.resolve.outputs.edbArtifactsJson)[matrix.pgMajor].filename }}
 
       - name: Install official PostgreSQL ${{ matrix.pgMajor }}
         id: install
         shell: pwsh
+        env:
+          EDB_MINOR: ${{ fromJson(needs.resolve.outputs.edbArtifactsJson)[matrix.pgMajor].minor }}
+          EDB_URL: ${{ fromJson(needs.resolve.outputs.edbArtifactsJson)[matrix.pgMajor].url }}
         run: |
-          $pgRoot = & ./scripts/Install-PostgreSql.ps1 -Major ${{ matrix.pgMajor }}
+          $pgRoot = & ./scripts/Install-PostgreSql.ps1 -Major ${{ matrix.pgMajor }} -Minor $env:EDB_MINOR -BinariesUrl $env:EDB_URL
           "pgRoot=$pgRoot" >> $env:GITHUB_OUTPUT
 
       - name: Clone upstream tag
@@ -283,16 +309,18 @@ jobs:
           "zip=$zip" >> $env:GITHUB_OUTPUT
           "pkgDir=${{ runner.temp }}/pkg" >> $env:GITHUB_OUTPUT
 
-      - name: Record EDB binaries SHA-256 in package
+      - name: Record EDB artifact SHA-256 in package
         shell: pwsh
+        env:
+          EDB_ARTIFACT_FILENAME: ${{ fromJson(needs.resolve.outputs.edbArtifactsJson)[matrix.pgMajor].filename }}
         run: |
-          $zips = @(Get-ChildItem .pg-cache -Filter 'postgresql-*.zip' -File | Sort-Object LastWriteTime -Descending)
-          if ($zips.Count -eq 0) { throw "No EDB binaries zip found in .pg-cache" }
-          $zip = $zips[0]
+          $artifactFile = $env:EDB_ARTIFACT_FILENAME
+          $zip = Get-ChildItem .pg-cache -Filter $artifactFile -File | Select-Object -First 1
+          if (-not $zip) { throw "Resolved EDB artifact not found in .pg-cache: $artifactFile" }
           $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          $hashFile = Join-Path "${{ steps.package.outputs.pkgDir }}" 'edb-binaries.sha256'
-          "$hash  $($zip.Name)" | Set-Content -Path $hashFile -Encoding ascii
-          Write-Host "EDB binaries SHA-256: $hash ($($zip.Name))"
+          $recordFile = Join-Path "${{ steps.package.outputs.pkgDir }}" 'edb-artifact.txt'
+          "$hash  $artifactFile" | Set-Content -Path $recordFile -Encoding ascii
+          Write-Host "EDB artifact SHA-256 (calculated post-download): $hash ($artifactFile)"
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -389,7 +417,12 @@ jobs:
           $upstreamRepo = Get-UpstreamRepository
           $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           $checksums = (Get-Content artifacts/SHA256SUMS.txt) -join "`n"
-          $edbHash = if (Test-Path artifacts/edb-binaries.sha256) { (Get-Content artifacts/edb-binaries.sha256 -Raw).Trim() } else { 'unavailable' }
+          $edbRecord = if (Test-Path artifacts/edb-artifact.txt) { (Get-Content artifacts/edb-artifact.txt -Raw).Trim() } else { '' }
+          if (-not $edbRecord) { throw 'Missing edb-artifact.txt; cannot record EDB artifact provenance in the release body.' }
+          $edbParts = $edbRecord -split '\s+', 2
+          $edbHash = $edbParts[0].Trim()
+          $edbArchive = $edbParts[1].Trim()
+          if (-not $edbHash -or -not $edbArchive) { throw "Malformed edb-artifact.txt: '$edbRecord'" }
 
           $template = Get-Content .github/release-body-template.md -Raw
           # PowerShell cannot continue a method chain on a fresh line (a
@@ -403,11 +436,14 @@ jobs:
           $body = $body.Replace('{{PG_MAJOR}}', '${{ matrix.pgMajor }}')
           $body = $body.Replace('{{RUN_URL}}', $runUrl)
           $body = $body.Replace('{{CHECKSUMS}}', $checksums)
+          $body = $body.Replace('{{EDB_ARCHIVE}}', $edbArchive)
+          $body = $body.Replace('{{EDB_URL}}', '${{ fromJson(needs.resolve.outputs.edbArtifactsJson)[matrix.pgMajor].url }}')
           $body = $body.Replace('{{EDB_BINARIES_SHA256}}', $edbHash)
           $body | Set-Content -Path release-body.md -Encoding utf8
 
           $releaseTag = '${{ steps.tag.outputs.releaseTag }}'
           gh release create $releaseTag --repo $env:GITHUB_REPOSITORY --draft `
+            --target $env:GITHUB_SHA `
             --title "pglogical $('${{ needs.resolve.outputs.version }}') (windows.$('${{ needs.resolve.outputs.packagingRevision }}')) — PostgreSQL ${{ matrix.pgMajor }}" `
             --notes-file release-body.md
           Write-Host "Draft release created: $releaseTag"
