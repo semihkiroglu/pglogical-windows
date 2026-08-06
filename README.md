@@ -47,13 +47,20 @@ Architecture: **x64 only**. Configuration: **Release only**.
 
 ## Packages
 
-Every published release contains one ZIP per PostgreSQL major:
+Every published release contains one ZIP per PostgreSQL major. The ZIP
+name identifies the **exact build input** — the PostgreSQL minor and the
+EDB packaging revision the extension was compiled and linked against:
 
 ```
-pglogical-<pglogical-version>-pg<postgres-major>-windows-x64.zip
+pglogical-<pglogical-version>-pg<postgres-major>.<postgres-minor>-edb<edb-revision>-windows-x64.zip
 ```
 
-Example: `pglogical-2.4.8-pg18-windows-x64.zip`
+Example: `pglogical-2.4.8-pg18.4-edb2-windows-x64.zip`
+
+(The GitHub release **tag** remains major-oriented —
+`pglogical-2.4.8-pg18-windows.1` — and identifies the compatibility-major
+release stream; the ZIP name and the embedded `BUILD-INFO.json` pin the
+exact build inputs.)
 
 Each ZIP has an installation-oriented layout:
 
@@ -69,7 +76,15 @@ share/
     pglogical_origin--1.0.0.sql
 bin/
   pglogical_create_subscriber.exe
+BUILD-INFO.json
 ```
+
+`BUILD-INFO.json` records the exact provenance: pglogical version, upstream
+repository/tag/commit SHA, PostgreSQL compatibility major, exact build
+version, EDB packaging revision, EDB artifact filename/URL, the EDB archive
+SHA-256 **calculated by this project after download** (never a
+vendor-published checksum), the Windows packaging revision, and
+architecture/configuration.
 
 No PostgreSQL/EDB binaries, headers, or libraries are bundled. The upstream
 pglogical copyright notice is included in each package.

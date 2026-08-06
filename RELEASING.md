@@ -22,26 +22,63 @@ separate from the upstream compat/build policy.
 ## Exact EDB artifact resolution
 
 PostgreSQL minors are pinned to `https://www.postgresql.org/versions.json`
-(the authoritative latest-supported source). The exact Windows x64 binaries
-artifact is then resolved directly on the official EDB host
-(`get.enterprisedb.com`) by HEAD-probing `postgresql-<major>.<minor>-<revision>-windows-x64-binaries.zip`
-in ascending revision order and taking the **highest revision that exists**.
+(the authoritative latest-supported source; the response is validated before
+use). The exact Windows x64 binaries artifact is resolved on the
+EDB-controlled download host (`get.enterprisedb.com`) by **controlled
+availability probing** of
+`postgresql-<major>.<minor>-<revision>-windows-x64-binaries.zip`.
 
-Packaging revision `-1` is **never silently assumed**: EDB can republish the
-same minor under a new packaging revision (e.g. `postgresql-18.4-1-...` →
-`postgresql-18.4-2-...`), and the extension must be compiled and linked
-against the headers/import libraries of the exact distribution it ships
-with. No third-party package manifest (Scoop, Chocolatey, WinGet, …) is ever
-used as a trust source. If no revision resolves, the caller fails closed
-with a clear error instead of guessing. The resolved artifact is verified to
-belong to the requested major/minor before anything is built, both by
-filename construction and by the installed `PG_VERSION_NUM` after extraction.
+This is **heuristic availability discovery, not an authoritative EDB
+manifest** (PostgreSQL's JSON does not carry the EDB packaging revision,
+and no official EDB machine-readable current-artifact feed exists). The
+resolver therefore:
+
+* validates every candidate URL (https, `get.enterprisedb.com`, correct
+  path and archive filename, matching major/minor/revision) before any
+  request;
+* probes with HEAD, falling back to a minimal `Range: bytes=0-0` GET only
+  when HEAD is explicitly unsupported for a non-transient protocol reason
+  (the full ZIP is never downloaded just to check existence);
+* classifies every probe result as **Available / NotFound /
+  TransientFailure / InvalidResponse**. Only a definitive 404/410 — or the
+  observed EDB/CDN 403 `AccessDenied` S3 signature for absent artifacts —
+  means "not present". Timeouts, DNS/TLS/socket failures, 408/425/429/5xx
+  are indeterminate and are retried a bounded number of times with short
+  backoff; after retry exhaustion the run **fails closed** — an older
+  revision is never silently substituted;
+* rejects redirects (none are observed on the EDB host; any redirect —
+  HTTPS downgrade or foreign host — fails closed);
+* probes the **entire bounded revision range** `1..MaxRevision` (default
+  10, configurable for tests), so a gap (`-1` and `-3` present, `-2`
+  absent) still resolves `-3`;
+* returns no artifact only when **every** candidate is conclusively absent,
+  and fails when the highest available revision equals the configured bound
+  (a higher revision may exist beyond it).
+
+Packaging revision `-1` is **never silently assumed**. No third-party
+package manifest (Scoop, Chocolatey, WinGet, …) is ever used as a trust
+source. The resolved artifact is verified to belong to the requested
+major/minor before anything is built, both by filename construction and by
+the installed `PG_VERSION_NUM` after extraction.
 
 The downloaded ZIP is cached by filename (and in CI by a cache key that
 includes the exact artifact filename), so a different packaging revision can
 never reuse the wrong cached ZIP. The post-download SHA-256 is calculated
 and recorded in release provenance as a **calculated** checksum — EDB does
 not publish official checksums for these archives, and none is claimed.
+
+## Release-plan pinning
+
+`upstream-watch.yml` resolves every EDB artifact **once**, at planning
+time, and dispatches a **single** `release.yml` run carrying the complete
+pinned plan (one entry per missing release × PostgreSQL major, with the
+exact EDB artifact identity per entry — different majors may use different
+EDB revisions). `release.yml` validates the whole plan before any build
+(malformed JSON, duplicate majors, invalid revisions, non-HTTPS/non-EDB
+URLs, filename identity mismatches, upstream tag/commit SHA) and verifies
+every pinned URL is still conclusively available — without re-discovering
+or substituting a newer revision. A newer EDB revision appearing after
+planning is picked up by the next watcher run, not by the current build.
 
 ## Upstream release discovery
 
@@ -67,9 +104,13 @@ Ubuntu runner (cheap) and:
    * newer artifact (minor and/or packaging revision) → plan the **next
      packaging revision** for that major only;
    * older artifact or an unrecorded/unparseable identity → fail closed;
-6. emits an idempotent JSON build plan (single version × N majors);
+6. emits an idempotent JSON build plan (single version × N majors, each
+   entry pinning its exact EDB artifact);
 7. does nothing when the latest release is already fully packaged;
-8. dispatches `release.yml` for each missing entry.
+8. dispatches **one** `release.yml` run with the complete pinned plan
+   (plan-entry matrix; every entry carries its own `windows.N` packaging
+   revision and its own pinned EDB artifact — a single global
+   packaging-revision input could not represent per-major differences).
 
 **The EDB artifact identity is the rebuild trigger** — a post-download SHA
 recalculation alone never triggers a release. Once a release exists with the
@@ -124,29 +165,49 @@ pglogical-2.4.8-pg15-windows.1
    the PostgreSQL major matrix = configured majors in
    `.github/pg-versions.json` ∩ the upstream `compat<major>` directories,
    and resolves the exact official EDB artifact for every feasible major
-   (fail closed when any is unresolvable). An
-   optional `postgresMajors` input restricts the matrix (used by CI).
-2. **build** (Windows, per major): installs the exact resolved EDB Windows
-   binaries into an isolated directory (cached under the exact artifact
-   filename), clones the exact upstream tag, verifies the expected upstream
-   commit SHA against the checkout (always, even for caller-supplied
-   checkouts), builds with CMake + MSVC, verifies DLL exports with
-   `dumpbin`, runs the smoke test, packages the ZIP + per-major checksum,
-   and records the EDB artifact filename and its calculated SHA-256.
+   (fail closed when any is unresolvable). An optional `postgresMajors`
+   input restricts the matrix (used by CI). When a pinned `planJson` input
+   is supplied (the watcher path), the whole plan is validated first and
+   every pinned EDB URL is verified still available — no discovery or
+   substitution happens in the build.
+2. **build** (Windows, per plan entry): installs the exact pinned EDB
+   Windows binaries into an isolated directory (reused only on exact
+   artifact-identity match via `EDB-INSTALL-INFO.json`, cached under the
+   exact artifact filename), clones the exact upstream tag, verifies the
+   expected upstream commit SHA against the checkout (always, even for
+   caller-supplied checkouts), builds with CMake + MSVC, verifies DLL
+   exports with `dumpbin`, runs the smoke test, packages the exact-version
+   ZIP (`pglogical-<v>-pg<major>.<minor>-edb<rev>-windows-x64.zip`) with an
+   embedded `BUILD-INFO.json`, and records the EDB artifact filename and
+   its calculated SHA-256.
 3. **publish** (Ubuntu, `contents: write` only here): downloads all
-   artifacts, verifies the expected ZIP count and every SHA-256 locally,
-   creates a **draft** release pinned to the validated commit
-   (`--target $GITHUB_SHA`), uploads all ZIPs and the aggregate
+   artifacts, verifies the expected ZIP name/count and every SHA-256
+   locally, creates a **draft** release pinned to the validated commit
+   (`--target $GITHUB_SHA`) with a title identifying the compatibility
+   major and the exact build input, uploads all ZIPs and the aggregate
    `SHA256SUMS.txt`, and only then publishes the release. The release body
-   records the exact EDB artifact filename, URL, and calculated SHA-256. On
-   any failure the incomplete draft is deleted; a failed build never leaves
-   a partial release.
+   records distinct provenance fields: pglogical version, upstream repo /
+   tag / commit SHA, Windows packaging revision, PostgreSQL compatibility
+   major, exact build version, EDB packaging revision, EDB artifact
+   filename, EDB artifact URL, and the project-calculated EDB archive
+   SHA-256. On any failure the incomplete draft is deleted; a failed build
+   never leaves a partial release.
+4. **set-latest** (Ubuntu): after every publish job succeeds, GitHub
+   Latest is reconciled deterministically — the highest **configured**
+   PostgreSQL major with a published (non-draft, non-prerelease) release
+   for this pglogical version is selected from **all** existing releases,
+   not from the current change set alone (so rebuilding only PG15 cannot
+   steal Latest from an existing PG18 release).
 
 ## Manual dispatch
 
 ```bash
-# Build + publish pglogical 2.4.8 for all supported majors:
+# Build + publish pglogical 2.4.8 for all supported majors (discovery mode):
 gh workflow run release.yml -f upstreamTag=REL2_4_8 -f packagingRevision=1
+
+# Build + publish from a pinned plan (the watcher path; plan entries carry
+# the exact per-major EDB artifact and packaging revision):
+gh workflow run release.yml -f planJson='[{"pglogicalVersion":"2.4.8", ...}]'
 
 # Rebuild without touching the release (e.g. for CI experiments):
 gh workflow run release.yml -f upstreamTag=REL2_4_8 -f dryRun=true
