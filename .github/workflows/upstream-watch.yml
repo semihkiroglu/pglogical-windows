@@ -1,7 +1,8 @@
 # upstream-watch.yml — discovers the latest upstream pglogical release,
 # detects EDB artifact identity changes (packaging revision or filename) for
-# supported PostgreSQL majors, and dispatches Windows packaging builds for
-# the missing release × major combinations.
+# supported PostgreSQL majors, and dispatches ONE release.yml run with the
+# complete pinned plan (all missing release × major entries in a single
+# plan-entry matrix).
 #
 # Runs daily on an Ubuntu runner (cheap) and only dispatches Windows builds
 # when something is actually missing: a brand-new upstream version, or an
@@ -78,14 +79,14 @@ jobs:
             return
           }
           foreach ($p in $plan.plan) {
-            Write-Host "MISSING: $($p.version) ($($p.upstreamTag) @ $($p.commitSha)) -> $($p.localTag) [EDB $($p.edbArtifactFilename)]"
+            Write-Host "MISSING: $($p.pglogicalVersion) ($($p.upstreamTag) @ $($p.upstreamCommitSha)) -> $($p.localTag) [EDB $($p.edbArtifactFilename)]"
           }
 
   # ---------------------------------------------------------------------------
-  # Dispatch: trigger release.yml for each missing version × major.
+  # Dispatch: trigger ONE release.yml run with the complete pinned plan.
   # ---------------------------------------------------------------------------
   dispatch:
-    name: Dispatch release builds
+    name: Dispatch release build with pinned plan
     needs: discover
     if: ${{ !cancelled() && needs.discover.outputs.planCount != '0' }}
     runs-on: ubuntu-24.04
@@ -101,21 +102,18 @@ jobs:
         with:
           name: release-plan
 
-      - name: Dispatch release for each missing entry
+      - name: Dispatch one release workflow with the pinned plan
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $plan = Get-Content release-plan.json -Raw | ConvertFrom-Json
-          foreach ($p in $plan.plan) {
-            Write-Host "Dispatching release for $($p.version) PG $($p.pgMajor) (tag $($p.upstreamTag), revision $($p.packagingRevision))"
-            gh workflow run release.yml `
-              --repo $env:GITHUB_REPOSITORY `
-              --ref $env:GITHUB_REF_NAME `
-              -f upstreamTag="$($p.upstreamTag)" `
-              -f packagingRevision="$($p.packagingRevision)" `
-              -f postgresMajors="$($p.pgMajor)" `
-              -f dryRun=false
-            if ($LASTEXITCODE -ne 0) { throw "gh workflow run failed for $($p.upstreamTag) PG $($p.pgMajor)" }
-          }
-          Write-Host 'Dispatched all missing releases. release.yml concurrency groups prevent duplicate publication.'
+          $entriesJson = @($plan.plan) | ConvertTo-Json -Compress -Depth 6
+          Write-Host "Dispatching one release.yml run with $($plan.plan.Count) pinned plan entr(ies)"
+          gh workflow run release.yml `
+            --repo $env:GITHUB_REPOSITORY `
+            --ref $env:GITHUB_REF_NAME `
+            -f planJson="$entriesJson" `
+            -f dryRun=false
+          if ($LASTEXITCODE -ne 0) { throw 'gh workflow run failed to dispatch the pinned release plan' }
+          Write-Host 'Dispatched. release.yml validates the whole plan, verifies every pinned EDB URL, and builds the exact pinned artifacts.'

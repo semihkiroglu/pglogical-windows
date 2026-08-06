@@ -384,16 +384,17 @@ function Get-ReleasePlan {
         if ($existing.Count -eq 0) {
             Write-Host "No local release for pglogical $Version / PostgreSQL $key; planning windows.1 against $($artifact.filename)"
             $plan.Add([pscustomobject]@{
-                version             = $Version
-                upstreamTag         = $UpstreamTag
-                commitSha           = $CommitSha
-                pgMajor             = $key
-                packagingRevision   = 1
-                localTag            = Get-LocalReleaseTag -Version $Version -PackagingRevision 1 -PgMajor $key
-                edbArtifactFilename = $artifact.filename
-                edbArtifactUrl      = $artifact.url
-                edbMinor            = $artifact.minor
-                edbRevision         = $artifact.revision
+                pglogicalVersion          = $Version
+                upstreamTag               = $UpstreamTag
+                upstreamCommitSha         = $CommitSha
+                postgresqlMajor           = $key
+                postgresqlMinor           = $artifact.minor
+                postgresqlBuildVersion    = "$($artifact.major).$($artifact.minor)"
+                windowsPackagingRevision  = 1
+                edbPackagingRevision      = $artifact.revision
+                edbArtifactFilename       = $artifact.filename
+                edbArtifactUrl            = $artifact.url
+                localTag                  = Get-LocalReleaseTag -Version $Version -PackagingRevision 1 -PgMajor $key
             })
             continue
         }
@@ -422,16 +423,17 @@ function Get-ReleasePlan {
         $nextRevision = [int](($existing | Measure-Object -Property revision -Maximum).Maximum + 1)
         Write-Host "EDB artifact changed for pglogical $Version / PostgreSQL ${key}: $recordedFilename -> $($artifact.filename); planning windows.$nextRevision"
         $plan.Add([pscustomobject]@{
-            version             = $Version
-            upstreamTag         = $UpstreamTag
-            commitSha           = $CommitSha
-            pgMajor             = $key
-            packagingRevision   = $nextRevision
-            localTag            = Get-LocalReleaseTag -Version $Version -PackagingRevision $nextRevision -PgMajor $key
-            edbArtifactFilename = $artifact.filename
-            edbArtifactUrl      = $artifact.url
-            edbMinor            = $artifact.minor
-            edbRevision         = $artifact.revision
+            pglogicalVersion          = $Version
+            upstreamTag               = $UpstreamTag
+            upstreamCommitSha         = $CommitSha
+            postgresqlMajor           = $key
+            postgresqlMinor           = $artifact.minor
+            postgresqlBuildVersion    = "$($artifact.major).$($artifact.minor)"
+            windowsPackagingRevision  = $nextRevision
+            edbPackagingRevision      = $artifact.revision
+            edbArtifactFilename       = $artifact.filename
+            edbArtifactUrl            = $artifact.url
+            localTag                  = Get-LocalReleaseTag -Version $Version -PackagingRevision $nextRevision -PgMajor $key
         })
     }
     return @($plan)
@@ -500,23 +502,69 @@ function Get-VsDevCmdPath {
 # PostgreSQL.org versions.json — authoritative source for latest minors
 # ---------------------------------------------------------------------------
 
+function ConvertTo-ValidatedPgOrgEntries {
+    <#
+    .SYNOPSIS
+        Validates a parsed PostgreSQL.org versions.json response and returns
+        the entries. Malformed responses, missing required properties
+        (major/latestMinor/supported), and duplicate major entries fail
+        closed. Extracted from Get-PgOrgVersions so the validation is
+        unit-testable without network access.
+    #>
+    param($Response)
+    $entries = @($Response)
+    if ($entries.Count -eq 0) {
+        throw 'PostgreSQL.org versions.json returned no entries; refusing to treat an empty response as valid (fail closed).'
+    }
+    $seen = @{}
+    foreach ($e in $entries) {
+        if ($null -eq $e.major) { throw 'PostgreSQL.org versions.json contains an entry without the required "major" property.' }
+        $key = [string]$e.major
+        if ($seen.ContainsKey($key)) { throw "PostgreSQL.org versions.json contains duplicate major entry '$key'." }
+        $seen[$key] = $true
+        if ($null -eq $e.latestMinor) { throw "PostgreSQL.org versions.json major '$key' is missing the required ""latestMinor"" property." }
+        if ($null -eq $e.supported) { throw "PostgreSQL.org versions.json major '$key' is missing the required ""supported"" property." }
+        $eolProp = $e.PSObject.Properties['eolDate']
+        if ($null -ne $eolProp -and $eolProp.Value -and $e.supported) {
+            Write-Host "PostgreSQL.org versions.json major '$key' is marked supported with a non-null eolDate; accepting (support-state data inconsistency is tolerated only when the supported flag is authoritative)."
+        }
+    }
+    return $entries
+}
+
 function Get-PgOrgVersions {
     <#
     .SYNOPSIS
-        Fetches https://www.postgresql.org/versions.json and returns the
-        parsed array. Each entry: major (int), latestMinor (int), supported
-        (bool), eolDate (string or null).
+        Fetches https://www.postgresql.org/versions.json, validates the
+        response structure (see ConvertTo-ValidatedPgOrgEntries), and returns
+        the parsed array. Each entry: major (int), latestMinor (int),
+        supported (bool), eolDate (string or null).
     #>
     Write-Host "Fetching PostgreSQL.org versions.json"
     $response = Invoke-RestMethod -Uri 'https://www.postgresql.org/versions.json' -Method Get -TimeoutSec 30
-    return @($response)
+    return ConvertTo-ValidatedPgOrgEntries -Response $response
+}
+
+function Get-PgOrgEntry {
+    <#
+    .SYNOPSIS
+        Returns the validated PostgreSQL.org versions.json entry for one
+        major. Throws when the major is missing or duplicated.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Major)
+    $entries = Get-PgOrgVersions
+    $match = @($entries | Where-Object { [string]$_.major -eq $Major })
+    if ($match.Count -eq 0) { throw "PostgreSQL major $Major not found in PostgreSQL.org versions.json (fail closed)." }
+    if ($match.Count -gt 1) { throw "PostgreSQL.org versions.json contains duplicate entries for major $Major; refusing to pick one (fail closed)." }
+    return $match[0]
 }
 
 function Get-EdbBinaryUrl {
     <#
     .SYNOPSIS
         Derives the EDB Windows binaries URL for a given major + minor +
-        packaging revision.
+        packaging revision. The returned URL is validated against the
+        candidate contract by Assert-EdbCandidateUrl before any request.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Major,
@@ -526,100 +574,295 @@ function Get-EdbBinaryUrl {
     return "https://get.enterprisedb.com/postgresql/postgresql-$Major.$Minor-$Revision-windows-x64-binaries.zip"
 }
 
-function Test-EdbBinaryUrl {
+# The single EDB-controlled host for Windows binaries artifacts.
+$script:EdbHost = 'get.enterprisedb.com'
+
+# Injectable raw HTTP transport used by the EDB probe. Production default is
+# Invoke-EdbHttpRaw; unit tests replace this with a stub that never touches
+# the network. A transport stub is a function returning a raw result hashtable
+# with the same shape as Invoke-EdbHttpRaw.
+$script:EdbHttpTransport = $null
+
+function Assert-EdbCandidateUrl {
     <#
     .SYNOPSIS
-        HEAD-probes an EDB binaries URL. Returns true if the URL responds
-        with a 2xx status, false otherwise (including 404).
+        Validates that a URL is a well-formed EDB Windows x64 binaries
+        candidate for exactly the requested major/minor/revision: scheme is
+        https, host is get.enterprisedb.com, path begins with /postgresql/,
+        and the filename matches the archive pattern with matching
+        major/minor/revision. Returns $true; throws (fail closed) otherwise.
     #>
-    param([Parameter(Mandatory = $true)][string]$Url)
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Major,
+        [Parameter(Mandatory = $true)][string]$Minor,
+        [Parameter(Mandatory = $true)][int]$Revision
+    )
+    $uri = $null
+    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri)) {
+        throw "Malformed EDB candidate URL: $Url"
+    }
+    if ($uri.Scheme -ne 'https') { throw "EDB candidate URL must use https: $Url" }
+    if ($uri.Host -ne $script:EdbHost) { throw "EDB candidate URL host must be $($script:EdbHost): $Url" }
+    if (-not $uri.AbsolutePath.StartsWith('/postgresql/', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "EDB candidate URL path must begin with /postgresql/: $Url"
+    }
+    $filename = [System.IO.Path]::GetFileName($uri.AbsolutePath)
+    $parsed = ConvertFrom-EdbArtifactFilename -Filename $filename
+    if (-not $parsed) { throw "EDB candidate filename does not match the expected archive pattern: $filename" }
+    if ($parsed.major -ne [string]$Major) { throw "EDB candidate filename major $($parsed.major) does not match requested major $Major" }
+    if ($parsed.minor -ne [string]$Minor) { throw "EDB candidate filename minor $($parsed.minor) does not match requested minor $Minor" }
+    if ($parsed.revision -ne $Revision) { throw "EDB candidate filename revision $($parsed.revision) does not match candidate revision $Revision" }
+    return $true
+}
+
+function Invoke-EdbHttpRaw {
+    <#
+    .SYNOPSIS
+        Performs ONE raw HTTP request (HEAD or ranged GET) against an EDB
+        candidate URL with manual redirect handling. Never throws for
+        HTTP-level outcomes; transport failures are classified into an
+        ErrorCategory. This is the production default transport and is
+        replaced by a stub in unit tests.
+
+    .OUTPUTS
+        Hashtable: @{ StatusCode; ContentType; Server; FinalUrl; Chain;
+                     ErrorCategory; ErrorMessage }
+        ErrorCategory: None | Timeout | Dns | Tls | Connection | Protocol | Other
+    #>
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('HEAD', 'GET')][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [switch]$UseRange,
+        [int]$TimeoutSeconds = 20
+    )
+    $handler = [System.Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
+    $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::None
+    $handler.UseCookies = $false
+    $client = [System.Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
     try {
-        $response = Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing -TimeoutSec 15
-        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
+        $current = $Url
+        $chain = [System.Collections.Generic.List[string]]::new()
+        for ($hop = 0; $hop -le 5; $hop++) {
+            $chain.Add($current)
+            $httpMethod = if ($Method -eq 'HEAD') { [System.Net.Http.HttpMethod]::Head } else { [System.Net.Http.HttpMethod]::Get }
+            $req = [System.Net.Http.HttpRequestMessage]::new($httpMethod, $current)
+            if ($UseRange) { $req.Headers.TryAddWithoutValidation('Range', 'bytes=0-0') | Out-Null }
+            $resp = $client.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            $status = [int]$resp.StatusCode
+            $location = $null
+            if ($resp.Headers.Location) { $location = [string]$resp.Headers.Location }
+            $contentType = ''
+            if ($resp.Content.Headers.ContentType) { $contentType = [string]$resp.Content.Headers.ContentType }
+            $server = ''
+            if ($resp.Headers.Server) { $server = (($resp.Headers.Server | ForEach-Object { $_.Product.ToString() }) -join ',') }
+            if ($status -ge 300 -and $status -lt 400 -and $location) {
+                $target = $null
+                if ([Uri]::TryCreate($location, [UriKind]::Absolute, [ref]$target)) {
+                    $current = [string]$target
+                }
+                elseif ([Uri]::TryCreate([Uri]$current, $location, [ref]$target)) {
+                    $current = [string]$target
+                }
+                else {
+                    $resp.Dispose(); $req.Dispose()
+                    return @{ StatusCode = $status; ContentType = ''; Server = ''; FinalUrl = $current; Chain = @($chain); ErrorCategory = 'Protocol'; ErrorMessage = "Malformed redirect Location header: $location" }
+                }
+                $resp.Dispose(); $req.Dispose()
+                continue
+            }
+            $resp.Dispose(); $req.Dispose()
+            return @{ StatusCode = $status; ContentType = $contentType; Server = $server; FinalUrl = $current; Chain = @($chain); ErrorCategory = 'None'; ErrorMessage = '' }
+        }
+        return @{ StatusCode = 0; ContentType = ''; Server = ''; FinalUrl = $current; Chain = @($chain); ErrorCategory = 'Protocol'; ErrorMessage = 'Redirect limit exceeded (more than 5 hops)' }
     }
     catch {
-        Write-Host "HEAD probe failed for $Url : $($_.Exception.Message)"
-        return $false
+        $category = 'Other'
+        $message = $_.Exception.Message
+        $inner = $_.Exception
+        while ($inner.InnerException) { $inner = $inner.InnerException }
+        if ($_.Exception -is [System.Threading.Tasks.TaskCanceledException]) {
+            $category = 'Timeout'
+        }
+        elseif ($inner -is [System.Net.Sockets.SocketException]) {
+            if ($inner.SocketErrorCode -eq [System.Net.Sockets.SocketError]::HostNotFound -or $inner.SocketErrorCode -eq [System.Net.Sockets.SocketError]::NoData) {
+                $category = 'Dns'
+            } else {
+                $category = 'Connection'
+            }
+        }
+        elseif ($inner -is [System.Security.Authentication.AuthenticationException]) {
+            $category = 'Tls'
+        }
+        elseif ($_.Exception -is [System.Net.Http.HttpRequestException]) {
+            $category = 'Connection'
+        }
+        return @{ StatusCode = 0; ContentType = ''; Server = ''; FinalUrl = $Url; Chain = @($Url); ErrorCategory = $category; ErrorMessage = $message }
     }
+    finally {
+        $client.Dispose()
+        $handler.Dispose()
+    }
+}
+
+function ConvertTo-EdbProbeResult {
+    <#
+    .SYNOPSIS
+        Classifies one raw transport result into the probe result model:
+        Available | NotFound | TransientFailure | InvalidResponse |
+        HeadUnsupported. Redirect/identity validation happens here: any
+        redirect (observed EDB behavior has none) or final-URL deviation
+        from the candidate fails closed as InvalidResponse.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Raw,
+        [Parameter(Mandatory = $true)][string]$Url
+    )
+    if ($Raw.ErrorCategory -ne 'None') {
+        return @{ Result = 'TransientFailure'; StatusCode = 0; Reason = "transport $($Raw.ErrorCategory): $($Raw.ErrorMessage)" }
+    }
+    if ([string]$Raw.FinalUrl -ne $Url) {
+        return @{ Result = 'InvalidResponse'; StatusCode = $Raw.StatusCode; Reason = "final URL '$($Raw.FinalUrl)' differs from candidate '$Url'; redirects are not observed on the EDB host and are rejected (fail closed)" }
+    }
+    $code = [int]$Raw.StatusCode
+    if ($code -ge 200 -and $code -lt 300) {
+        return @{ Result = 'Available'; StatusCode = $code; Reason = '' }
+    }
+    if ($code -eq 404 -or $code -eq 410) {
+        return @{ Result = 'NotFound'; StatusCode = $code; Reason = "HTTP $code" }
+    }
+    if ($code -eq 405 -or $code -eq 501) {
+        return @{ Result = 'HeadUnsupported'; StatusCode = $code; Reason = "HTTP $code (HEAD unsupported)" }
+    }
+    if ($code -eq 408 -or $code -eq 425 -or $code -eq 429 -or ($code -ge 500 -and $code -le 599)) {
+        return @{ Result = 'TransientFailure'; StatusCode = $code; Reason = "HTTP $code" }
+    }
+    if ($code -eq 403) {
+        # Observed EDB/CDN behavior (verified Aug 2026): missing artifacts
+        # return 403 with an S3 AccessDenied XML error (server: AmazonS3),
+        # never 404. Treat that exact signature as the host's definitive
+        # absence response; any other 403 fails closed.
+        if ($Raw.ContentType -match 'application/xml' -and $Raw.Server -match 'AmazonS3') {
+            return @{ Result = 'NotFound'; StatusCode = 403; Reason = 'HTTP 403 with the observed EDB S3 AccessDenied signature (definitive absence on the EDB host)' }
+        }
+        return @{ Result = 'InvalidResponse'; StatusCode = 403; Reason = 'HTTP 403 without the EDB S3 absence signature; refusing to classify (fail closed)' }
+    }
+    return @{ Result = 'InvalidResponse'; StatusCode = $code; Reason = "unexpected HTTP status $code" }
+}
+
+function Probe-EdbArtifactUrl {
+    <#
+    .SYNOPSIS
+        Probes one EDB candidate URL and returns the classified result
+        (Available | NotFound | TransientFailure | InvalidResponse).
+        Transient failures are retried a bounded number of times with short
+        backoff; when HEAD is explicitly unsupported (405/501), a minimal
+        ranged GET (Range: bytes=0-0) fallback is used with the same
+        validation and retry behavior. The candidate URL is validated before
+        the first request.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Major,
+        [Parameter(Mandatory = $true)][string]$Minor,
+        [Parameter(Mandatory = $true)][int]$Revision,
+        [ValidateRange(1, 5)][int]$MaxAttempts = 3
+    )
+    Assert-EdbCandidateUrl -Url $Url -Major $Major -Minor $Minor -Revision $Revision | Out-Null
+    $transport = if ($script:EdbHttpTransport) { $script:EdbHttpTransport } else { 'Invoke-EdbHttpRaw' }
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $raw = & $transport -Method 'HEAD' -Url $Url
+        $result = ConvertTo-EdbProbeResult -Raw $raw -Url $Url
+        if ($result.Result -eq 'TransientFailure') {
+            if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds (1 * $attempt) }
+            continue
+        }
+        if ($result.Result -ne 'HeadUnsupported') { return $result }
+        # HEAD explicitly unsupported (non-transient): ranged GET fallback.
+        for ($getAttempt = 1; $getAttempt -le $MaxAttempts; $getAttempt++) {
+            $raw = & $transport -Method 'GET' -UseRange -Url $Url
+            $result = ConvertTo-EdbProbeResult -Raw $raw -Url $Url
+            if ($result.Result -eq 'TransientFailure') {
+                if ($getAttempt -lt $MaxAttempts) { Start-Sleep -Seconds (1 * $getAttempt) }
+                continue
+            }
+            return $result
+        }
+        return $result
+    }
+    return @{ Result = 'TransientFailure'; StatusCode = 0; Reason = "transient failures exhausted after $MaxAttempts attempts" }
 }
 
 function Resolve-EdbArtifact {
     <#
     .SYNOPSIS
-        Resolves the current exact EDB Windows x64 binaries artifact for a
-        PostgreSQL major from the official EDB host (get.enterprisedb.com).
+        Resolves the exact EDB Windows x64 binaries artifact for a
+        PostgreSQL major/minor by probing the ENTIRE bounded revision range
+        on the EDB-controlled host and returning the highest conclusively
+        available revision.
 
     .DESCRIPTION
-        The minor version comes from https://www.postgresql.org/versions.json
-        (the authoritative source for latest supported minors). The exact
-        packaging revision is then resolved by HEAD-probing
-        get.enterprisedb.com in ascending order and taking the highest
-        revision that exists. Revision -1 is never silently assumed: EDB can
-        republish the same minor under a new packaging revision (e.g.
-        postgresql-18.4-1 -> postgresql-18.4-2), and the extension must be
-        built against the exact artifact whose headers/import libraries are
-        used. No third-party package manifest is consulted.
-
-    .PARAMETER Major
-        PostgreSQL major, e.g. 18.
-
-    .PARAMETER Minor
-        Optional explicit minor. When omitted, derived from pg.org
-        versions.json (latestMinor for the major).
-
-    .PARAMETER MaxRevision
-        Upper bound for the revision enumeration. Revisions above this are
-        never considered.
+        The minor comes from https://www.postgresql.org/versions.json (the
+        authoritative source for latest supported minors); the EDB packaging
+        revision is heuristic availability discovery against the
+        EDB-controlled download host — NOT an authoritative EDB manifest.
+        The full range 1..MaxRevision is probed (gaps are allowed), any
+        indeterminate result fails the resolution (no fallback to an older
+        revision), and a highest-available revision equal to MaxRevision
+        fails because the upper boundary is inconclusive. No artifact is
+        returned only when every candidate was conclusively absent.
 
     .OUTPUTS
         A PSCustomObject with .major, .minor, .revision, .filename and .url,
-        or $null when no artifact exists (callers fail closed).
+        or $null when no artifact conclusively exists.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Major,
         [string]$Minor,
-        [ValidateRange(1, 50)][int]$MaxRevision = 10
+        [ValidateRange(1, 50)][int]$MaxRevision = 10,
+        [ValidateRange(1, 5)][int]$MaxAttempts = 3
     )
     if (-not $Minor) {
-        $versions = Get-PgOrgVersions
-        $entry = @($versions | Where-Object { [string]$_.major -eq $Major } | Select-Object -First 1)
-        if (-not $entry) {
-            Write-Host "PostgreSQL major $Major not found in versions.json"
-            return $null
-        }
-        $Minor = [string]$entry[0].latestMinor
+        $entry = Get-PgOrgEntry -Major $Major
+        $Minor = [string]$entry.latestMinor
     }
 
-    $resolved = $null
+    $highest = $null
     for ($revision = 1; $revision -le $MaxRevision; $revision++) {
         $url = Get-EdbBinaryUrl -Major $Major -Minor $Minor -Revision $revision
-        if (Test-EdbBinaryUrl -Url $url) {
-            $resolved = [pscustomobject]@{
+        $result = Probe-EdbArtifactUrl -Url $url -Major $Major -Minor $Minor -Revision $revision -MaxAttempts $MaxAttempts
+        if ($result.Result -eq 'Available') {
+            $highest = [pscustomobject]@{
                 major    = $Major
                 minor    = $Minor
                 revision = $revision
                 filename = [System.IO.Path]::GetFileName([Uri]$url)
                 url      = $url
             }
-            Write-Host "EDB artifact revision $revision available: $($resolved.filename)"
+            Write-Host "EDB artifact revision $revision available: $($highest.filename)"
+        }
+        elseif ($result.Result -eq 'NotFound') {
+            Write-Host "EDB artifact revision $revision absent: $url ($($result.Reason))"
+        }
+        elseif ($result.Result -eq 'TransientFailure') {
+            throw "EDB artifact probe for $url remained indeterminate after retries ($($result.Reason)); refusing to fall back to an older revision (fail closed)."
         }
         else {
-            Write-Host "EDB artifact revision $revision not available: $url"
-            break
+            throw "EDB artifact probe for $url returned an invalid response ($($result.Reason)); failing closed."
         }
     }
-    if (-not $resolved) {
-        Write-Host "No EDB Windows x64 binaries artifact found for PostgreSQL $Major.$Minor on get.enterprisedb.com (no revision responded; probed ascending from revision 1)."
+
+    if (-not $highest) {
+        Write-Host "No EDB Windows x64 binaries artifact found for PostgreSQL $Major.$Minor on get.enterprisedb.com (every candidate revision 1..$MaxRevision conclusively absent)."
         return $null
     }
-
-    # Defense in depth: the resolved artifact must belong to the requested
-    # PostgreSQL major before anything is built against it.
-    $parsed = ConvertFrom-EdbArtifactFilename -Filename $resolved.filename
-    if (-not $parsed -or $parsed.major -ne $Major) {
-        throw "Resolved EDB artifact $($resolved.filename) does not belong to PostgreSQL major $Major; refusing to use it (fail closed)."
+    if ($highest.revision -eq $MaxRevision) {
+        throw "The highest available EDB revision for PostgreSQL $Major.$Minor is $MaxRevision, equal to the configured probe bound; a higher revision may exist beyond the bound, so this resolution is inconclusive (fail closed). Raise MaxRevision if this is a false alarm."
     }
-    return $resolved
+    return $highest
 }
 
 function ConvertFrom-EdbArtifactFilename {
@@ -663,6 +906,275 @@ function Get-EdbArtifactFromReleaseBody {
         }
     }
     return $null
+}
+
+function Get-PackageZipName {
+    <#
+    .SYNOPSIS
+        Computes the exact-version package ZIP name for a plan entry:
+        pglogical-<version>-pg<major>.<minor>-edb<revision>-windows-x64.zip.
+        The name identifies the exact PostgreSQL build version and EDB
+        packaging revision, unlike the major-oriented release tag.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$PglogicalVersion,
+        [Parameter(Mandatory = $true)][string]$PostgresqlMajor,
+        [Parameter(Mandatory = $true)][string]$PostgresqlMinor,
+        [Parameter(Mandatory = $true)][int]$EdbPackagingRevision
+    )
+    return "pglogical-$PglogicalVersion-pg$PostgresqlMajor.$PostgresqlMinor-edb$EdbPackagingRevision-windows-x64.zip"
+}
+
+function New-BuildInfo {
+    <#
+    .SYNOPSIS
+        Generates the BUILD-INFO.json content for a package, using ONLY the
+        validated/pinned plan entry plus the project-calculated EDB archive
+        SHA-256. Never rediscovers any version while packaging. Deterministic
+        property order and stable encoding (UTF-8, no BOM).
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)][string]$EdbArtifactCalculatedSha256,
+        [string]$Architecture = 'x64',
+        [string]$Configuration = 'Release'
+    )
+    $info = [ordered]@{
+        pglogicalVersion             = [string]$Entry.pglogicalVersion
+        upstreamRepository           = (Get-UpstreamRepository)
+        upstreamTag                  = [string]$Entry.upstreamTag
+        upstreamCommitSha            = [string]$Entry.upstreamCommitSha
+        postgresqlCompatibilityMajor = [string]$Entry.postgresqlMajor
+        postgresqlBuildVersion       = [string]$Entry.postgresqlBuildVersion
+        edbPackagingRevision         = [int]$Entry.edbPackagingRevision
+        edbArtifactFilename          = [string]$Entry.edbArtifactFilename
+        edbArtifactUrl               = [string]$Entry.edbArtifactUrl
+        edbArtifactCalculatedSha256  = $EdbArtifactCalculatedSha256
+        windowsPackagingRevision     = [int]$Entry.windowsPackagingRevision
+        architecture                 = $Architecture
+        configuration                = $Configuration
+    }
+    return ($info | ConvertTo-Json -Depth 4)
+}
+
+function Select-LatestRelease {
+    <#
+    .SYNOPSIS
+        Deterministically selects which release must be GitHub Latest for a
+        pglogical version: the highest configured PostgreSQL major that has
+        a published (non-draft, non-prerelease) release for that version.
+        Drafts, prereleases, unrelated versions, and unconfigured majors are
+        ignored. Returns the matching release tag, or $null when none exists.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Majors,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Releases
+    )
+    $pattern = "^pglogical-$([regex]::Escape($Version))-pg([0-9]+)-windows\.([0-9]+)$"
+    $configured = @($Majors | ForEach-Object { [string]$_ } | Sort-Object { [int]$_ })
+    $best = $null   # @{ major; revision; tag }
+    foreach ($major in $configured) {
+        $bestForMajor = $null
+        foreach ($r in $Releases) {
+            if ($r.draft -or $r.prerelease) { continue }
+            $m = [regex]::Match([string]$r.tag_name, $pattern)
+            if (-not $m.Success) { continue }
+            if ($m.Groups[1].Value -ne $major) { continue }
+            $revision = [int]$m.Groups[2].Value
+            if (-not $bestForMajor -or $revision -gt $bestForMajor.revision) {
+                $bestForMajor = @{ major = $major; revision = $revision; tag = [string]$r.tag_name }
+            }
+        }
+        if ($bestForMajor) { $best = $bestForMajor }
+    }
+    if (-not $best) { return $null }
+    return $best.tag
+}
+
+function Test-ReleasePlan {
+    <#
+    .SYNOPSIS
+        Validates a serialized release plan (JSON array of plan entries)
+        against the pinned plan-entry contract. Returns the validated
+        entries; throws (fail closed) on the first violation. Validation
+        covers: JSON well-formedness, required properties, duplicate
+        PostgreSQL majors, revision sanity, upstream tag pattern, upstream
+        commit SHA format, HTTPS/EDB-host URLs, and filename identity
+        (major/minor/revision match against the entry fields).
+    #>
+    param([Parameter(Mandatory = $true)][string]$PlanJson)
+    if ([string]::IsNullOrWhiteSpace($PlanJson)) {
+        throw 'Release plan JSON is empty; a pinned plan is required.'
+    }
+    $entries = $null
+    try {
+        $entries = @($PlanJson | ConvertFrom-Json)
+    }
+    catch {
+        throw "Release plan JSON is malformed: $($_.Exception.Message)"
+    }
+    if ($entries.Count -eq 0) {
+        throw 'Release plan contains no entries.'
+    }
+    $tagPattern = [regex](Get-UpstreamTagPattern)
+    $required = @(
+        'pglogicalVersion', 'upstreamTag', 'upstreamCommitSha',
+        'postgresqlMajor', 'postgresqlMinor', 'postgresqlBuildVersion',
+        'windowsPackagingRevision', 'edbPackagingRevision',
+        'edbArtifactFilename', 'edbArtifactUrl'
+    )
+    $seenMajors = @{}
+    $planVersion = $null
+    $planTag = $null
+    $planSha = $null
+    foreach ($e in $entries) {
+        # Whole-plan consistency: every entry must target the same upstream
+        # release and commit (one pglogical version per plan).
+        if ($null -eq $planVersion) {
+            $planVersion = [string]$e.pglogicalVersion
+            $planTag = [string]$e.upstreamTag
+            $planSha = [string]$e.upstreamCommitSha
+        }
+        elseif ([string]$e.pglogicalVersion -ne $planVersion -or [string]$e.upstreamTag -ne $planTag -or [string]$e.upstreamCommitSha -ne $planSha) {
+            throw "Release plan mixes different upstream releases/commits; every entry must pin the same pglogical version, upstream tag, and upstream commit SHA."
+        }
+        foreach ($prop in $required) {
+            $propInfo = $e.PSObject.Properties[$prop]
+            if ($null -eq $propInfo -or $null -eq $propInfo.Value) {
+                throw "Release plan entry is missing required property '$prop'."
+            }
+        }
+        if ([string]$e.upstreamCommitSha -notmatch '^[0-9a-fA-F]{40}$') {
+            throw "Release plan entry has invalid upstreamCommitSha '$($e.upstreamCommitSha)' (expected 40 hex characters)."
+        }
+        if (-not $tagPattern.IsMatch([string]$e.upstreamTag)) {
+            throw "Release plan entry has invalid upstream tag '$($e.upstreamTag)' (expected $(Get-UpstreamTagPattern))."
+        }
+        if ([int]$e.windowsPackagingRevision -lt 1) {
+            throw "Release plan entry has invalid windowsPackagingRevision '$($e.windowsPackagingRevision)'."
+        }
+        if ([int]$e.edbPackagingRevision -lt 1) {
+            throw "Release plan entry has invalid edbPackagingRevision '$($e.edbPackagingRevision)'."
+        }
+        $major = [string]$e.postgresqlMajor
+        if ($seenMajors.ContainsKey($major)) {
+            throw "Release plan contains duplicate PostgreSQL major '$major'."
+        }
+        $seenMajors[$major] = $true
+        if ([string]"$($e.postgresqlMajor).$($e.postgresqlMinor)" -ne [string]$e.postgresqlBuildVersion) {
+            throw "Release plan entry postgresqlBuildVersion '$($e.postgresqlBuildVersion)' does not match major.minor '$($e.postgresqlMajor).$($e.postgresqlMinor)'."
+        }
+        $uri = $null
+        if (-not [Uri]::TryCreate([string]$e.edbArtifactUrl, [UriKind]::Absolute, [ref]$uri)) {
+            throw "Release plan entry has malformed edbArtifactUrl '$($e.edbArtifactUrl)'."
+        }
+        if ($uri.Scheme -ne 'https') {
+            throw "Release plan entry edbArtifactUrl must use https: '$($e.edbArtifactUrl)'."
+        }
+        if ($uri.Host -ne $script:EdbHost) {
+            throw "Release plan entry edbArtifactUrl host must be $($script:EdbHost): '$($e.edbArtifactUrl)'."
+        }
+        $filename = [System.IO.Path]::GetFileName($uri.AbsolutePath)
+        if ($filename -ne [string]$e.edbArtifactFilename) {
+            throw "Release plan entry edbArtifactFilename '$($e.edbArtifactFilename)' does not match the URL filename '$filename'."
+        }
+        $parsed = ConvertFrom-EdbArtifactFilename -Filename $filename
+        if (-not $parsed) {
+            throw "Release plan entry has invalid edbArtifactFilename '$filename' (expected the EDB archive pattern)."
+        }
+        if ($parsed.major -ne $major) {
+            throw "Release plan entry EDB filename major '$($parsed.major)' does not match postgresqlMajor '$major'."
+        }
+        if ($parsed.minor -ne [string]$e.postgresqlMinor) {
+            throw "Release plan entry EDB filename minor '$($parsed.minor)' does not match postgresqlMinor '$($e.postgresqlMinor)'."
+        }
+        if ($parsed.revision -ne [int]$e.edbPackagingRevision) {
+            throw "Release plan entry EDB filename revision '$($parsed.revision)' does not match edbPackagingRevision '$($e.edbPackagingRevision)'."
+        }
+    }
+    return $entries
+}
+
+function Test-PinnedEdbUrl {
+    <#
+    .SYNOPSIS
+        Verifies that a pinned plan entry's EDB artifact URL is still
+        conclusively available on the EDB host. The pinned identity is used
+        as-is — discovery is never repeated, and no other revision is ever
+        substituted. A definitive absence fails, an indeterminate result
+        fails after retries.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [int]$MaxAttempts = 3
+    )
+    $result = Probe-EdbArtifactUrl `
+        -Url ([string]$Entry.edbArtifactUrl) `
+        -Major ([string]$Entry.postgresqlMajor) `
+        -Minor ([string]$Entry.postgresqlMinor) `
+        -Revision ([int]$Entry.edbPackagingRevision) `
+        -MaxAttempts $MaxAttempts
+    if ($result.Result -eq 'Available') {
+        Write-Host "Pinned EDB artifact verified available: $($Entry.edbArtifactFilename)"
+        return $true
+    }
+    if ($result.Result -eq 'NotFound') {
+        throw "Pinned EDB artifact $($Entry.edbArtifactFilename) is definitively absent on the EDB host ($($result.Reason)); failing closed."
+    }
+    throw "Pinned EDB artifact $($Entry.edbArtifactFilename) could not be verified ($($result.Reason)); failing closed without substituting another revision."
+}
+
+function Test-InstallMetadataIdentity {
+    <#
+    .SYNOPSIS
+        Verifies parsed installation metadata (EDB-INSTALL-INFO.json content)
+        against the exact requested artifact identity. Returns $true only
+        when EVERY field matches: PostgreSQL major, minor, build version, EDB
+        packaging revision, artifact filename, and artifact URL. A $null
+        (missing/malformed) metadata object is never a match.
+    #>
+    param(
+        $Info,
+        [Parameter(Mandatory = $true)][string]$Major,
+        [Parameter(Mandatory = $true)][string]$Minor,
+        [Parameter(Mandatory = $true)][int]$EdbRevision,
+        [Parameter(Mandatory = $true)][string]$ArtifactFilename,
+        [Parameter(Mandatory = $true)][string]$ArtifactUrl
+    )
+    if (-not $Info) { return $false }
+    $checks = @(
+        ([string]$Info.postgresqlMajor -eq $Major),
+        ([string]$Info.postgresqlMinor -eq $Minor),
+        ([string]$Info.postgresqlBuildVersion -eq "$Major.$Minor"),
+        ([int]$Info.edbPackagingRevision -eq $EdbRevision),
+        ([string]$Info.edbArtifactFilename -eq $ArtifactFilename),
+        ([string]$Info.edbArtifactUrl -eq $ArtifactUrl)
+    )
+    return ($checks -notcontains $false)
+}
+
+function Test-PgConfigVersion {
+    <#
+    .SYNOPSIS
+        Reads PG_VERSION / PG_VERSION_NUM from a pg_config.h file and checks
+        the exact major.minor. Returns $true on match, $false otherwise.
+        PostgreSQL headers never contain the EDB packaging revision, so only
+        major/minor are checked here.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$PgConfigHeader,
+        [Parameter(Mandatory = $true)][string]$ExpectedMajor,
+        [Parameter(Mandatory = $true)][string]$ExpectedMinor
+    )
+    if (-not (Test-Path $PgConfigHeader)) { return $false }
+    $verLine = Select-String -Path $PgConfigHeader -Pattern '#define PG_VERSION "([0-9.]+)"' | Select-Object -First 1
+    $verNumLine = Select-String -Path $PgConfigHeader -Pattern '#define PG_VERSION_NUM ([0-9]+)' | Select-Object -First 1
+    if (-not $verLine -or -not $verNumLine) { return $false }
+    $installedNum = [int]$verNumLine.Matches[0].Groups[1].Value
+    $installedMajor = [math]::Floor($installedNum / 10000)
+    $installedMinor = $installedNum % 10000
+    return ($installedMajor -eq [int]$ExpectedMajor -and $installedMinor -eq [int]$ExpectedMinor)
 }
 
 function Invoke-InVsEnv {

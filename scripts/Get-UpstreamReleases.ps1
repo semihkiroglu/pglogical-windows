@@ -184,7 +184,7 @@ $plan = @(Get-ReleasePlan `
     -Majors $majors `
     -Artifacts $artifacts `
     -LocalReleases $localReleases)
-$plan = @($plan | Sort-Object { [int]$_.pgMajor })
+$plan = @($plan | Sort-Object { [int]$_.postgresqlMajor })
 
 $result = [pscustomobject]@{
     generatedAt    = (Get-Date).ToUniversalTime().ToString('o')
@@ -209,7 +209,7 @@ if (-not $Quiet) {
     else {
         Write-Host "Build plan ($($plan.Count) missing release(s)):"
         foreach ($p in $plan) {
-            Write-Host "  $($p.version) [$($p.upstreamTag) @ $($p.commitSha)] -> $($p.localTag)"
+            Write-Host "  $($p.pglogicalVersion) [$($p.upstreamTag) @ $($p.upstreamCommitSha)] -> $($p.localTag) [EDB $($p.edbArtifactFilename)]"
         }
     }
 }

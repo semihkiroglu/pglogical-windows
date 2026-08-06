@@ -74,11 +74,11 @@ Test-Case 'A brand-new upstream version plans windows.1 for every major' {
     }
     $plan = Invoke-Plan -Majors @('14', '18') -Artifacts $artifacts -LocalReleases @()
     Assert-Equal 2 @($plan).Count
-    $pg14 = @($plan | Where-Object { $_.pgMajor -eq '14' })[0]
-    $pg18 = @($plan | Where-Object { $_.pgMajor -eq '18' })[0]
-    Assert-Equal 1 $pg14.packagingRevision
+    $pg14 = @($plan | Where-Object { $_.postgresqlMajor -eq '14' })[0]
+    $pg18 = @($plan | Where-Object { $_.postgresqlMajor -eq '18' })[0]
+    Assert-Equal 1 $pg14.windowsPackagingRevision
     Assert-Equal 'pglogical-2.4.8-pg14-windows.1' $pg14.localTag
-    Assert-Equal 1 $pg18.packagingRevision
+    Assert-Equal 1 $pg18.windowsPackagingRevision
     Assert-Equal 'postgresql-18.4-2-windows-x64-binaries.zip' $pg18.edbArtifactFilename
 }
 
@@ -106,8 +106,8 @@ Test-Case 'A -1 to -2 artifact change marks only the affected major' {
     )
     $plan = Invoke-Plan -Majors @('14', '18') -Artifacts $artifacts -LocalReleases $releases
     Assert-Equal 1 @($plan).Count
-    Assert-Equal '18' $plan[0].pgMajor
-    Assert-Equal 2 $plan[0].packagingRevision
+    Assert-Equal '18' $plan[0].postgresqlMajor
+    Assert-Equal 2 $plan[0].windowsPackagingRevision
     Assert-Equal 'pglogical-2.4.8-pg18-windows.2' $plan[0].localTag
     Assert-Equal 'postgresql-18.4-2-windows-x64-binaries.zip' $plan[0].edbArtifactFilename
 }
@@ -183,11 +183,11 @@ Test-Case 'Multiple changed majors are handled without rebuilding unchanged majo
     }
     $plan = Invoke-Plan -Majors @('14', '15', '16', '17', '18') -Artifacts $artifacts -LocalReleases $releases
     Assert-Equal 2 @($plan).Count
-    $plannedMajors = @($plan | ForEach-Object { $_.pgMajor } | Sort-Object)
+    $plannedMajors = @($plan | ForEach-Object { $_.postgresqlMajor } | Sort-Object)
     Assert-Equal '15,17' ($plannedMajors -join ',')
     foreach ($entry in $plan) {
-        Assert-Equal 2 $entry.packagingRevision
-        Assert-Equal "pglogical-2.4.8-pg$($entry.pgMajor)-windows.2" $entry.localTag
+        Assert-Equal 2 $entry.windowsPackagingRevision
+        Assert-Equal "pglogical-2.4.8-pg$($entry.postgresqlMajor)-windows.2" $entry.localTag
     }
 }
 
@@ -201,7 +201,7 @@ Test-Case 'The next packaging revision is the highest existing revision plus one
     )
     $plan = Invoke-Plan -Majors @('18') -Artifacts $artifacts -LocalReleases $releases
     Assert-Equal 1 @($plan).Count
-    Assert-Equal 3 $plan[0].packagingRevision
+    Assert-Equal 3 $plan[0].windowsPackagingRevision
     Assert-Equal 'pglogical-2.4.8-pg18-windows.3' $plan[0].localTag
 }
 
@@ -217,7 +217,7 @@ Test-Case 'A newer minor of the same major triggers a rebuild (revision resets t
     )
     $plan = Invoke-Plan -Majors @('18') -Artifacts $artifacts -LocalReleases $releases
     Assert-Equal 1 @($plan).Count
-    Assert-Equal 3 $plan[0].packagingRevision
+    Assert-Equal 3 $plan[0].windowsPackagingRevision
     Assert-Equal 'postgresql-18.5-1-windows-x64-binaries.zip' $plan[0].edbArtifactFilename
 }
 

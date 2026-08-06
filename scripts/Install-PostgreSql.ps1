@@ -109,15 +109,33 @@ else {
 
 $url = $BinariesUrl
 
+# Exact artifact identity derived from the selected URL (never from
+# PG_VERSION_NUM — PostgreSQL headers do not contain the EDB packaging
+# revision).
+$artifactFilename = [System.IO.Path]::GetFileName([Uri]$url)
+$artifactParsed = ConvertFrom-EdbArtifactFilename -Filename $artifactFilename
+if (-not $artifactParsed) {
+    throw "The resolved EDB binaries URL does not have a valid archive filename: $url"
+}
+if ($artifactParsed.major -ne $majorKey -or $artifactParsed.minor -ne [string]$Minor) {
+    throw "The resolved EDB binaries URL filename '$artifactFilename' does not match the requested PostgreSQL $Major.$Minor (fail closed)."
+}
+
 # Optional official checksum; absent until EDB publishes one.
 $expectedSha256 = ''
 
 if (-not $DestinationDir) { $DestinationDir = Join-Path $repoRoot ".pg\installs\pg$majorKey" }
 if (-not $CacheDir) { $CacheDir = Join-Path $repoRoot '.pg-cache' }
 $pgRoot = Join-Path $DestinationDir 'pgsql'
+$null = New-Item -ItemType Directory -Force -Path $CacheDir
+$zipPath = Join-Path $CacheDir $artifactFilename
+$installInfoPath = Join-Path $DestinationDir 'EDB-INSTALL-INFO.json'
 
 # ---------------------------------------------------------------------------
-# Reuse a valid installation unless forced
+# Reuse an existing installation ONLY when it matches the exact artifact
+# identity: same major, same minor, same EDB packaging revision, same
+# filename/URL, valid metadata, and a consistent cached archive. Anything
+# missing, malformed, stale, or different reinstalls.
 # ---------------------------------------------------------------------------
 function Test-PgRootValid {
     param([string]$Root)
@@ -133,24 +151,62 @@ function Test-PgRootValid {
     return $true
 }
 
-if (-not $Force -and (Test-Path $pgRoot) -and (Test-Path (Join-Path $pgRoot 'include\pg_config.h'))) {
-    if (Test-PgRootValid -Root $pgRoot) {
-        $existing = Select-String -Path (Join-Path $pgRoot 'include\pg_config.h') -Pattern '#define PG_VERSION "([0-9]+)\.([0-9]+)' | Select-Object -First 1
-        if ($existing -and $existing.Matches[0].Groups[1].Value -eq $majorKey) {
-            Write-Host "Reusing existing PostgreSQL $($existing.Matches[0].Groups[1].Value).$($existing.Matches[0].Groups[2].Value) installation at $pgRoot"
-            return $pgRoot
+function Get-InstallInfo {
+    <#
+    .SYNOPSIS
+        Reads and parses EDB-INSTALL-INFO.json. Returns $null when the file
+        is missing or malformed (both mean "no reuse").
+    #>
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $null }
+    try {
+        return (Get-Content $Path -Raw | ConvertFrom-Json)
+    }
+    catch {
+        Write-Host "Installation metadata $Path is malformed; not reusing."
+        return $null
+    }
+}
+
+$reuse = $false
+if (-not $Force -and (Test-Path $pgRoot) -and (Test-PgRootValid -Root $pgRoot)) {
+    $info = Get-InstallInfo -Path $installInfoPath
+    if ($info -and (Test-InstallMetadataIdentity `
+            -Info $info `
+            -Major $majorKey `
+            -Minor $Minor `
+            -EdbRevision $artifactParsed.revision `
+            -ArtifactFilename $artifactFilename `
+            -ArtifactUrl $url) `
+        -and (Test-PgConfigVersion -PgConfigHeader (Join-Path $pgRoot 'include\pg_config.h') -ExpectedMajor $majorKey -ExpectedMinor $Minor)) {
+        $reuse = $true
+        # Cached archive consistency: when the cache still holds the ZIP,
+        # its calculated SHA must match the metadata record.
+        if (Test-Path $zipPath) {
+            $cachedHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if (-not [string]$info.calculatedSha256 -or $cachedHash -ne [string]$info.calculatedSha256) {
+                Write-Host "Cached archive SHA256 does not match installation metadata; reinstalling."
+                $reuse = $false
+            }
         }
     }
-    Write-Host "Existing installation at $pgRoot is incomplete or wrong version; reinstalling."
+    elseif ($info) {
+        Write-Host "Installation metadata does not match the exact requested artifact identity; reinstalling."
+    }
+    if ($reuse) {
+        Write-Host "Reusing existing exact-matching PostgreSQL installation at $pgRoot ($artifactFilename)"
+        return $pgRoot
+    }
 }
+elseif (-not $Force) {
+    Write-Host "Existing installation at $pgRoot is incomplete; reinstalling."
+}
+if ($reuse) { return $pgRoot }
+Write-Host "Installing exact artifact: $artifactFilename"
 
 # ---------------------------------------------------------------------------
 # Download (with cache)
 # ---------------------------------------------------------------------------
-$null = New-Item -ItemType Directory -Force -Path $CacheDir
-$zipName = [System.IO.Path]::GetFileName([Uri]$url)
-$zipPath = Join-Path $CacheDir $zipName
-
 $redownload = $Force -or -not (Test-Path $zipPath)
 if ($redownload) {
     Write-Host "Downloading $url"
@@ -220,6 +276,29 @@ $installedMinor = $installedNum % 10000
 if ($installedMajor -ne $expectedMajor -or $installedMinor -ne $expectedMinor) {
     throw "Installed PostgreSQL version ($installedVersion, PG_VERSION_NUM $installedNum) does not match the requested artifact PostgreSQL $expectedMajor.$expectedMinor"
 }
+
+# ---------------------------------------------------------------------------
+# Write installation metadata (atomic) — only after download, ZIP validity,
+# extraction, layout, and exact major.minor all succeeded. The SHA-256 is
+# calculated by this project post-download; it is NOT a vendor-published
+# checksum.
+# ---------------------------------------------------------------------------
+$calculatedSha = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$installInfo = [ordered]@{
+    postgresqlMajor      = $majorKey
+    postgresqlMinor      = $Minor
+    postgresqlBuildVersion = "$Major.$Minor"
+    edbPackagingRevision = $artifactParsed.revision
+    edbArtifactFilename  = $artifactFilename
+    edbArtifactUrl       = $url
+    calculatedSha256     = $calculatedSha
+    installedAtUtc       = (Get-Date).ToUniversalTime().ToString('o')
+}
+$null = New-Item -ItemType Directory -Force -Path $DestinationDir
+$tmpInfoPath = "$installInfoPath.tmp"
+$installInfo | ConvertTo-Json -Depth 3 | Set-Content -Path $tmpInfoPath -Encoding utf8
+Move-Item -Force -Path $tmpInfoPath -Destination $installInfoPath
+Write-Host "Installation metadata written: $installInfoPath (calculated SHA256 $calculatedSha)"
 
 Write-Host "PostgreSQL $installedVersion installed at:"
 Write-Host "  PG_ROOT=$pgRoot"
