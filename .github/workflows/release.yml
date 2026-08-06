@@ -395,6 +395,7 @@ jobs:
       - name: Verify package checksum
         shell: pwsh
         run: |
+          . ./scripts/common.ps1
           $zips = @(Get-ChildItem artifacts -Filter '*.zip' -File)
           if ($zips.Count -ne 1) {
             throw "Expected exactly 1 package ZIP for PG ${{ matrix.entry.postgresqlMajor }} but found $($zips.Count): $($zips.Name -join ', ')"
