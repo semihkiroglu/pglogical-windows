@@ -472,11 +472,11 @@ jobs:
 
       - name: Create release
         if: steps.existing.outputs.exists == 'false'
-        shell: pwsh
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $releaseTag = '${{ steps.tag.outputs.releaseTag }}'
+          releaseTag='${{ steps.tag.outputs.releaseTag }}'
           # No --draft: GitHub's immutable-release model rejects asset uploads
           # to drafts (uploads.github.com returns 404) and burned tag names
           # cannot be reused. Create the release directly WITH its assets in
@@ -484,11 +484,11 @@ jobs:
           # locked, so a separate upload step would fail. The
           # ownership-checked cleanup step still removes an incomplete
           # release on failure.
-          gh release create $releaseTag --repo $env:GITHUB_REPOSITORY `
-            --target $env:GITHUB_SHA `
-            --title "pglogical $('${{ needs.resolve.outputs.version }}') — PostgreSQL ${{ matrix.entry.postgresqlMajor }} (built against ${{ matrix.entry.postgresqlBuildVersion }}, EDB revision ${{ matrix.entry.edbPackagingRevision }}) — windows.$('${{ matrix.entry.windowsPackagingRevision }}')" `
-            --notes-file release-body.md `
-            @(Get-ChildItem artifacts -Filter '*.zip' -File | ForEach-Object { $_.FullName }) + (Join-Path (Get-Location) 'artifacts/SHA256SUMS.txt')
+          gh release create "$releaseTag" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "pglogical ${{ needs.resolve.outputs.version }} — PostgreSQL ${{ matrix.entry.postgresqlMajor }} (built against ${{ matrix.entry.postgresqlBuildVersion }}, EDB revision ${{ matrix.entry.edbPackagingRevision }}) — windows.${{ matrix.entry.windowsPackagingRevision }}" \
+            --notes-file release-body.md \
+            artifacts/*.zip artifacts/SHA256SUMS.txt
 
       - name: Capture created release identity
         if: steps.existing.outputs.exists == 'false'
