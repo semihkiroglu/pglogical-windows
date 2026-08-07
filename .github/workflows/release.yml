@@ -470,6 +470,21 @@ jobs:
           $body | Set-Content -Path release-body.md -Encoding utf8
           "bodyFile=$env:GITHUB_WORKSPACE/release-body.md" >> $env:GITHUB_OUTPUT
 
+      - name: Create release tag
+        # GitHub no longer creates a git tag when a draft release is created;
+        # the rest of this job resolves releases by tag, so create the tag
+        # explicitly first. 422 (already exists) is fine.
+        if: steps.existing.outputs.exists == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.tag.outputs.releaseTag }}"
+          if ! gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA" >/dev/null 2>&1; then
+            echo "Tag $tag already exists or could not be created; continuing."
+          fi
+
       - name: Create draft release
         if: steps.existing.outputs.exists == 'false'
         shell: pwsh
