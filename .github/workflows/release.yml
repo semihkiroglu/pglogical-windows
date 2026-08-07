@@ -496,8 +496,13 @@ jobs:
           $tag = '${{ steps.tag.outputs.releaseTag }}'
           # "Get release by tag" does not return drafts; resolve via the list
           # endpoint and parse in PowerShell (jq filters with quoted strings
-          # get mangled by pwsh native-argument quoting on Windows).
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
+          # get mangled by pwsh native-argument quoting on Windows). Retry:
+          # a just-created draft may not be visible in the list immediately.
+          $release = $null
+          for ($attempt = 0; $attempt -lt 5 -and -not $release; $attempt++) {
+            $release = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
+            if (-not $release) { Start-Sleep -Seconds 2 }
+          }
           if ($LASTEXITCODE -ne 0 -or -not $release -or -not $release.id) { throw "Could not resolve the release ID for $tag after release creation." }
           "created=true" >> $env:GITHUB_OUTPUT
           "releaseId=$($release.id)" >> $env:GITHUB_OUTPUT
@@ -510,12 +515,18 @@ jobs:
         shell: bash
         run: |
           # gh release upload resolves by tag, which does not work for
-          # drafts; upload via the release assets REST API instead.
+          # drafts; upload via the release assets REST API instead. The
+          # assets endpoint lives on uploads.github.com (api.github.com
+          # returns 404), so use curl rather than gh api.
           releaseId="${{ steps.created.outputs.releaseId }}"
           for f in artifacts/*.zip artifacts/SHA256SUMS.txt; do
             name=$(basename "$f")
-            gh api -X POST -H "Content-Type: application/octet-stream" --input "$f" \
-              "repos/$GITHUB_REPOSITORY/releases/$releaseId/assets?name=$name" --jq '.name' || exit 1
+            curl -sS -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$f" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$releaseId/assets?name=$name" || exit 1
           done
           gh api "repos/$GITHUB_REPOSITORY/releases/$releaseId/assets" --jq '.[].name'
 
@@ -555,7 +566,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Failed to delete incomplete draft release $tag (id $releaseId)." }
           # Remove the tag only for the incomplete release created by this
           # job (ownership verified above). A missing ref is fine.
-          $refDelete = & gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag" --silent 2>&1
+          $refDelete = & gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag" 2>&1
           if ($LASTEXITCODE -ne 0) { Write-Host "Tag ref cleanup skipped (exit $LASTEXITCODE): $refDelete" }
           Write-Host "Deleted incomplete draft release $tag (id $releaseId) created by this job."
 
