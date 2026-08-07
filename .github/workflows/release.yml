@@ -495,14 +495,13 @@ jobs:
         run: |
           $tag = '${{ steps.tag.outputs.releaseTag }}'
           # "Get release by tag" does not return drafts; resolve via the list
-          # endpoint instead (gh release list --json has no id field; jq
-          # strings need double quotes, so build the filter via concat).
-          $jqFilter = '.[] | select(.tag_name == "' + $tag + '") | .id'
-          $id = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq $jqFilter | Select-Object -First 1
-          if ($LASTEXITCODE -ne 0 -or -not $id) { throw "Could not resolve the release ID for $tag after release creation." }
+          # endpoint and parse in PowerShell (jq filters with quoted strings
+          # get mangled by pwsh native-argument quoting on Windows).
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0 -or -not $release -or -not $release.id) { throw "Could not resolve the release ID for $tag after release creation." }
           "created=true" >> $env:GITHUB_OUTPUT
-          "releaseId=$id" >> $env:GITHUB_OUTPUT
-          Write-Host "Captured created release identity: $tag (id $id)"
+          "releaseId=$($release.id)" >> $env:GITHUB_OUTPUT
+          Write-Host "Captured created release identity: $tag (id $($release.id))"
 
       - name: Upload release assets
         if: steps.existing.outputs.exists == 'false'
