@@ -1,5 +1,12 @@
 # pglogical for Windows
 
+[![CI](https://github.com/semihkiroglu/pglogical-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/semihkiroglu/pglogical-windows/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/semihkiroglu/pglogical-windows)](https://github.com/semihkiroglu/pglogical-windows/releases/latest)
+[![License](https://img.shields.io/github/license/semihkiroglu/pglogical-windows)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078d6)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-336791)
+[![pglogical](https://img.shields.io/badge/pglogical-2.4.8-2f6f4f)](https://github.com/2ndQuadrant/pglogical)
+
 Unofficial Windows x64 packages of the [pglogical](https://github.com/2ndQuadrant/pglogical)
 PostgreSQL logical replication extension, built with CMake + MSVC against
 official EnterpriseDB PostgreSQL Windows installations.
@@ -9,47 +16,82 @@ independent, out-of-tree build of the upstream pglogical source. They are not
 published, endorsed, or supported by EnterpriseDB, 2ndQuadrant, or the
 PostgreSQL Global Development Group.
 
-## What this repository provides
+The upstream pglogical repository is **not forked or vendored**. Windows-specific
+patches, when needed, are applied only to the ephemeral build checkout; every
+build clones the exact upstream release tag. This repository is independent of
+EnterpriseDB, the PostgreSQL project, 2ndQuadrant, and the upstream pglogical
+maintainers.
 
-* An out-of-tree **CMake + MSVC** build of upstream pglogical for Windows
-  x64 — no MSYS2/MinGW, no Meson, no source-built PostgreSQL, no Docker.
-* Build and release automation on GitHub Actions:
-  * `ci.yml` — validation and a real Windows build + smoke test.
-  * `upstream-watch.yml` — daily discovery of new upstream releases.
-  * `release.yml` — the full PostgreSQL 14–18 build matrix and release
-    publication.
-  * `pg-versions-sync.yml` — daily PostgreSQL version matrix sync.
-* One GitHub release per PostgreSQL major, tagged
-  `pglogical-<version>-pg<major>-windows.<rev>` (e.g.
-  `pglogical-2.4.8-pg18-windows.1`), each with a ZIP and a `SHA256SUMS.txt`.
-* Local PowerShell tooling (`scripts/`) for building and testing on Windows.
+## Why this repository exists
 
-The upstream repository is not forked or vendored. Any Windows-specific
-patches are applied only to the ephemeral build checkout. Every build
-clones the exact upstream release tag.
+Upstream pglogical does not provide Windows binary packages. This repository
+provides an independent out-of-tree Windows x64 build and release pipeline for
+pglogical using **CMake, the Visual Studio toolchain (clang-cl/MSVC), and
+PowerShell** — no MSYS2/MinGW, no Meson, no source-built PostgreSQL, no Docker —
+without maintaining a permanent fork of upstream pglogical.
 
-## Supported versions
+The pipeline runs on GitHub Actions:
 
-| PostgreSQL major | Status |
-| --- | --- |
-| 14 | supported |
-| 15 | supported |
-| 16 | supported |
-| 17 | supported |
-| 18 | supported |
-| 19 | not included (prerelease); enable deliberately via `.github/pg-versions.json` |
+* `ci.yml` — validation and a real Windows build + smoke test.
+* `upstream-watch.yml` — daily discovery of new upstream releases.
+* `release.yml` — the full build matrix and release publication.
+* `pg-versions-sync.yml` — daily PostgreSQL version matrix sync.
 
-The build matrix for an upstream release is the intersection of the
-configured majors in [.github/pg-versions.json](.github/pg-versions.json) and the PostgreSQL
-versions that the upstream source supports (its `compat<major>` directories).
+## Quick Install
 
-Architecture: **x64 only**. Configuration: **Release only**.
+1. Go to [GitHub Releases](https://github.com/semihkiroglu/pglogical-windows/releases)
+   and download the ZIP matching your PostgreSQL build line, e.g.
+   `pglogical-2.4.8-pg18.4-edb2-windows-x64.zip`. (The exact PostgreSQL minor
+   and EDB packaging revision in the filename change between releases.)
+2. Verify the SHA-256 checksum against `SHA256SUMS.txt`.
+3. Extract the ZIP into the root of your PostgreSQL installation (for a
+   standard EDB installation: `C:\Program Files\PostgreSQL\<major>`) so that
+   its `lib\`, `share\extension\`, and `bin\` directories merge into the
+   existing layout.
+4. Configure PostgreSQL as required by upstream pglogical — at minimum:
 
-## Packages
+   ```conf
+   shared_preload_libraries = 'pglogical'
+   wal_level = logical
+   ```
 
-Every published release contains one ZIP per PostgreSQL major. The ZIP
-name identifies the **exact build input** — the PostgreSQL minor and the
-EDB packaging revision the extension was compiled and linked against:
+5. Restart PostgreSQL.
+6. Run `CREATE EXTENSION pglogical;` on each database that needs it.
+
+Install the package on **both** the provider and the subscriber node, for the
+matching PostgreSQL major. For the full node / subscription setup and any
+additional required settings (worker / slot limits), follow the upstream
+[pglogical documentation](https://github.com/2ndQuadrant/pglogical).
+
+## Compatibility
+
+| PostgreSQL | pglogical | Platform |
+| --- | --- | --- |
+| 14 | 2.4.8 | Windows x64 |
+| 15 | 2.4.8 | Windows x64 |
+| 16 | 2.4.8 | Windows x64 |
+| 17 | 2.4.8 | Windows x64 |
+| 18 | 2.4.8 | Windows x64 |
+
+The matrix is driven by [.github/pg-versions.json](.github/pg-versions.json):
+the build matrix for an upstream release is the intersection of the configured
+majors and the PostgreSQL versions the upstream source supports (its
+`compat<major>` directories). PostgreSQL 19 (prerelease) is not included and
+can only be enabled deliberately via `.github/pg-versions.json`.
+
+The exact build version of every package — PostgreSQL minor and EDB packaging
+revision — is recorded in the asset filename, the release provenance table, and
+the embedded `BUILD-INFO.json`.
+
+Architecture: **x64 only**. Configuration: **Release only**. The extension is
+only as compatible with your PostgreSQL version as the upstream source is.
+
+## Release and asset naming
+
+Each release contains one ZIP per PostgreSQL major. The GitHub release **tag**
+identifies the PostgreSQL compatibility-major release stream
+(`pglogical-<version>-pg<major>-windows.<rev>`), while the asset **filename**
+identifies the exact PostgreSQL build input:
 
 ```
 pglogical-<pglogical-version>-pg<postgres-major>.<postgres-minor>-edb<edb-revision>-windows-x64.zip
@@ -57,10 +99,12 @@ pglogical-<pglogical-version>-pg<postgres-major>.<postgres-minor>-edb<edb-revisi
 
 Example: `pglogical-2.4.8-pg18.4-edb2-windows-x64.zip`
 
-(The GitHub release **tag** remains major-oriented —
-`pglogical-2.4.8-pg18-windows.1` — and identifies the compatibility-major
-release stream; the ZIP name and the embedded `BUILD-INFO.json` pin the
-exact build inputs.)
+| Part | Meaning |
+| --- | --- |
+| `pglogical 2.4.8` | upstream pglogical version |
+| `PostgreSQL 18.4` | exact PostgreSQL version the extension was built against |
+| `EDB packaging revision 2` | revision of the EnterpriseDB binaries archive used |
+| `Windows x64` | platform / architecture |
 
 Each ZIP has an installation-oriented layout:
 
@@ -80,37 +124,52 @@ BUILD-INFO.json
 ```
 
 `BUILD-INFO.json` records the exact provenance: pglogical version, upstream
-repository/tag/commit SHA, PostgreSQL compatibility major, exact build
-version, EDB packaging revision, EDB artifact filename/URL, the EDB archive
-SHA-256 **calculated by this project after download** (never a
-vendor-published checksum), the Windows packaging revision, and
-architecture/configuration.
+repository/tag/commit SHA, PostgreSQL compatibility major, exact build version,
+EDB packaging revision, EDB artifact filename/URL, the EDB archive SHA-256
+**calculated by this project after download** (never a vendor-published
+checksum), the Windows packaging revision, and architecture/configuration.
 
 No PostgreSQL/EDB binaries, headers, or libraries are bundled. The upstream
 pglogical copyright notice is included in each package.
 
-## Installation
+## Security and provenance
 
-1. Download the ZIP matching your PostgreSQL major from the
-   [releases](./releases) page.
-2. Verify the SHA-256 checksum against `SHA256SUMS.txt`.
-3. Unzip into your PostgreSQL installation directory so that `lib\`,
-   `share\extension\`, and `bin\` merge with the existing layout. For a
-   standard EDB installation that is `C:\Program Files\PostgreSQL\<major>`.
-4. **Both the provider and the subscriber node must install the package**
-   for their PostgreSQL major.
-5. Follow the official pglogical documentation for server configuration
-   (`postgresql.conf` settings), `CREATE EXTENSION pglogical`, and node /
-   subscription setup: <https://github.com/2ndQuadrant/pglogical>.
+Release builds are engineered to be verifiable:
 
-## Local build
+* **Upstream source is pinned.** Each release build resolves the upstream
+  pglogical release tag, resolves and records its exact upstream commit SHA,
+  and verifies the checkout against that expected commit before building.
+* **No vendoring, no permanent fork.** Upstream source is never committed to
+  this repository; version-specific Windows patches are applied only to the
+  ephemeral build checkout when such a patch exists.
+* **Exact PostgreSQL build input.** PostgreSQL major/minor comes from
+  PostgreSQL.org's `versions.json`; the exact EnterpriseDB Windows binaries
+  artifact (including its packaging revision) is resolved by **controlled
+  availability probing** of the EDB-controlled download host. This is
+  heuristic availability discovery, **not** an authoritative EDB manifest.
+* **Pinned through the build.** The resolved artifact is pinned from planning
+  through build; the post-download SHA-256 of the EDB archive is calculated by
+  this project and recorded — EDB does not publish the checksums used here.
+* **Published checksums.** Every release ships a `SHA256SUMS.txt` and packages
+  embed `BUILD-INFO.json`.
+* **Real testing before publication.** Every release build runs a real
+  PostgreSQL install, `CREATE EXTENSION`, a logical slot check, and an
+  end-to-end provider→subscriber replication smoke test per major.
+* **Build provenance.** Release artifacts are attested with GitHub artifact
+  attestations (build provenance) in the publish workflow.
+
+Published releases are immutable: existing releases and assets are never
+overwritten or mutated.
+
+For more detail see [SECURITY.md](SECURITY.md) and [RELEASING.md](RELEASING.md).
+
+## Building from source
 
 Prerequisites: Windows x64, PowerShell 7, Visual Studio 2022+ with the
 "Desktop development with C++" workload **and the "C++ Clang tools for
-Windows" component** (the build compiles with clang-cl — see BUILDING.md
-for why), CMake >= 3.24, and an official PostgreSQL Windows installation
-(or run `scripts/Install-PostgreSql.ps1` to fetch one into an isolated
-directory).
+Windows" component** (the build compiles with clang-cl — see BUILDING.md for
+why), CMake >= 3.24, and an official PostgreSQL Windows installation (or run
+`scripts/Install-PostgreSql.ps1` to fetch one into an isolated directory).
 
 ```powershell
 # One-shot: download PG 18 into .pg\installs, clone REL2_4_8,
@@ -123,37 +182,14 @@ directory).
 
 Full instructions in [BUILDING.md](BUILDING.md).
 
-## Release synchronization
+## Documentation
 
-Release discovery, tagging, packaging-revision policy, and the daily
-automation (`pg-versions-sync.yml` at 03:00 UTC, `upstream-watch.yml` at
-03:30 UTC) are documented in [RELEASING.md](RELEASING.md).
-
-## Compatibility limitations
-
-* x64 only; 32-bit PostgreSQL is not supported.
-* Built with the Visual Studio ClangCL toolset (clang-cl compiler, MSVC
-  linker/CRT) against the official EnterpriseDB Windows binaries; other
-  Windows builds of PostgreSQL (e.g. conda, MinGW) are not targets.
-* `pglogical_create_subscriber.exe` is built, packaged, and exercised
-  end-to-end by the CI: every release build runs the full
-  basebackup/restore/catchup/subscription workflow against a live
-  provider and verifies both the basebackup data and live replication
-  (see `scripts/Test-PgLogical.ps1`, Step 9c). This applies to every
-  supported PostgreSQL major, not just one.
-* A single local patch is applied to the upstream source at build time
-  (version-pinned: the build fails loudly if it no longer applies):
-  - `patches/pglogical-2.4.8-windows.patch` — the Windows build fixes
-    (rand/sys-stat for the subscriber tool, PGDLLEXPORT on
-    `_PG_init`/`_PG_output_plugin_init`, shmem startup-hook wiring, DWORD
-    exit code, `QuoteWindowsArgv`, empty `shared_preload_libraries` for
-    the subscriber catchup start on cmd.exe).
-* The extension is only as compatible with your PostgreSQL version as the
-  upstream source is; see the upstream compatibility notes.
-
-## Security
-
-See [SECURITY.md](SECURITY.md) for how to report issues.
+* [BUILDING.md](BUILDING.md) — local build, test, and packaging.
+* [RELEASING.md](RELEASING.md) — release discovery, tagging, and automation.
+* [SECURITY.md](SECURITY.md) — reporting and package security properties.
+* [CONTRIBUTING.md](CONTRIBUTING.md) — what belongs here vs. upstream.
+* [SUPPORT.md](SUPPORT.md) — where to ask for help.
+* Upstream pglogical documentation: <https://github.com/2ndQuadrant/pglogical>
 
 ## License and attribution
 
