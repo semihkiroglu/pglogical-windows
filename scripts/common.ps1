@@ -957,6 +957,79 @@ function New-BuildInfo {
     return ($info | ConvertTo-Json -Depth 4)
 }
 
+# Injectable gh api runner for tests. When set, Invoke-GhApi calls it with
+# -Args <string[]> instead of the real CLI; it must return a hashtable with
+# ExitCode / Stdout / Stderr.
+$script:GhApiRunner = $null
+
+function Invoke-GhApi {
+    <#
+    .SYNOPSIS
+        Runs `gh api <args>` (or the injected test runner) and returns
+        @{ ExitCode; Stdout; Stderr }.
+    #>
+    param([Parameter(Mandatory = $true)][string[]]$Args)
+    if ($script:GhApiRunner) {
+        return & $script:GhApiRunner -Args $Args
+    }
+    $stdout = & gh api @Args 2> $null
+    $code = $LASTEXITCODE
+    $stderr = ''
+    if ($code -ne 0) {
+        $stderr = (& gh api @Args 2>&1 1> $null | Out-String) 2> $null
+    }
+    return @{ ExitCode = $code; Stdout = ($stdout | Out-String).TrimEnd(); Stderr = $stderr.Trim() }
+}
+
+function Test-ExistingRelease {
+    <#
+    .SYNOPSIS
+        Classifies whether a release exists for the exact tag, using the
+        GitHub REST API (repos/{repo}/releases/tags/{tag}).
+
+        Returns 'exists' (HTTP 200) or 'absent' (HTTP 404). Any other
+        outcome - authentication/authorization failures, rate limiting, API
+        outage, timeouts, network failures, malformed responses - throws,
+        so the caller fails closed instead of treating an error as absence.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Tag,
+        [Parameter(Mandatory = $true)][string]$Repository
+    )
+    $result = Invoke-GhApi -Args @("repos/$Repository/releases/tags/$Tag", "--jq", ".id")
+    if ($result.ExitCode -eq 0) {
+        if ($result.Stdout -match '^\d+\s*$') { return 'exists' }
+        throw "Release existence check for '$Tag' returned an unexpected response (exit 0, output '$($result.Stdout)'). Failing closed."
+    }
+    if ($result.Stderr -match 'HTTP 404') { return 'absent' }
+    throw "Release existence check for '$Tag' is indeterminate (exit $($result.ExitCode): $($result.Stderr.Trim())). Failing closed - not treating this as 'release absent'."
+}
+
+function Test-ReleaseOwnership {
+    <#
+    .SYNOPSIS
+        Cleanup ownership check. A draft release may be deleted only when
+        THIS job created it: 'created' must be exactly 'true', a valid
+        numeric release ID must have been captured after creation, and the
+        release currently at that ID must still target the expected tag.
+
+        Returns $true when deletion is authorized; $false otherwise (the
+        caller must leave the release and tag untouched - fail safe).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Created,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ReleaseId,
+        [Parameter(Mandatory = $true)][string]$Tag,
+        [Parameter(Mandatory = $true)][string]$Repository
+    )
+    if ($Created -ne 'true') { return $false }
+    if ($ReleaseId -notmatch '^\d+$') { return $false }
+    $result = Invoke-GhApi -Args @("repos/$Repository/releases/$ReleaseId", "--jq", ".tag_name")
+    if ($result.ExitCode -ne 0) { return $false }
+    $actualTag = ($result.Stdout -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+    return ($actualTag -eq $Tag)
+}
+
 function Select-LatestRelease {
     <#
     .SYNOPSIS
