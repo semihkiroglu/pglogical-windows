@@ -470,18 +470,19 @@ jobs:
           $body | Set-Content -Path release-body.md -Encoding utf8
           "bodyFile=$env:GITHUB_WORKSPACE/release-body.md" >> $env:GITHUB_OUTPUT
 
-      - name: Create draft release
+      - name: Create release
         if: steps.existing.outputs.exists == 'false'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $releaseTag = '${{ steps.tag.outputs.releaseTag }}'
-          # Draft is required: GitHub rejects asset uploads to published
-          # ("immutable") releases. Drafts no longer get a git tag, so the
-          # tag-based steps below use the release ID (list endpoint) instead.
-          # The git tag is created by GitHub when the draft is published.
-          gh release create $releaseTag --repo $env:GITHUB_REPOSITORY --draft `
+          # No --draft: GitHub's new draft model does not link a git tag and
+          # rejects asset uploads (uploads.github.com returns 404 for draft
+          # releases), so every tag/ID-based follow-up step breaks. Create the
+          # release directly; the ownership-checked cleanup step still removes
+          # an incomplete release on failure.
+          gh release create $releaseTag --repo $env:GITHUB_REPOSITORY `
             --target $env:GITHUB_SHA `
             --title "pglogical $('${{ needs.resolve.outputs.version }}') — PostgreSQL ${{ matrix.entry.postgresqlMajor }} (built against ${{ matrix.entry.postgresqlBuildVersion }}, EDB revision ${{ matrix.entry.edbPackagingRevision }}) — windows.$('${{ matrix.entry.windowsPackagingRevision }}')" `
             --notes-file release-body.md
@@ -494,13 +495,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ steps.tag.outputs.releaseTag }}'
-          # "Get release by tag" does not return drafts; resolve via the list
-          # endpoint and parse in PowerShell (jq filters with quoted strings
-          # get mangled by pwsh native-argument quoting on Windows). Retry:
-          # a just-created draft may not be visible in the list immediately.
+          # Published releases have their git tag, so "get release by tag"
+          # works (unlike drafts). Parse in PowerShell (jq filters with quoted
+          # strings get mangled by pwsh native-argument quoting on Windows).
+          # Retry: a just-created release may not be visible immediately.
           $release = $null
           for ($attempt = 0; $attempt -lt 5 -and -not $release; $attempt++) {
-            $release = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
+            $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>$null | ConvertFrom-Json
             if (-not $release) { Start-Sleep -Seconds 2 }
           }
           if ($LASTEXITCODE -ne 0 -or -not $release -or -not $release.id) { throw "Could not resolve the release ID for $tag after release creation." }
@@ -514,10 +515,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          # gh release upload resolves by tag, which does not work for
-          # drafts; upload via the release assets REST API instead. The
-          # assets endpoint lives on uploads.github.com (api.github.com
-          # returns 404), so use curl rather than gh api.
+          # Upload via the release assets REST API (uploads.github.com;
+          # api.github.com returns 404 for it), keyed by the captured release
+          # ID, so use curl rather than gh api.
           releaseId="${{ steps.created.outputs.releaseId }}"
           for f in artifacts/*.zip artifacts/SHA256SUMS.txt; do
             name=$(basename "$f")
@@ -536,16 +536,16 @@ jobs:
         with:
           subject-path: artifacts/*.zip
 
-      - name: Publish release
+      - name: Verify release is published
         if: steps.existing.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           releaseId="${{ steps.created.outputs.releaseId }}"
-          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$releaseId" -f draft=false --jq '.draft'
-          # Publishing creates the git tag; verify the tag-based lookup works.
-          isDraft=$(gh release view "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
+          # The release was created directly (no draft); verify it is
+          # published and tag-based lookup works.
+          isDraft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$releaseId" --jq '.draft')
           echo "isDraft=$isDraft"
           if [ "$isDraft" != "false" ]; then echo "Release is still a draft"; exit 1; fi
 
@@ -563,12 +563,12 @@ jobs:
             exit 1
           }
           gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/releases/$releaseId"
-          if ($LASTEXITCODE -ne 0) { throw "Failed to delete incomplete draft release $tag (id $releaseId)." }
+          if ($LASTEXITCODE -ne 0) { throw "Failed to delete incomplete release $tag (id $releaseId)." }
           # Remove the tag only for the incomplete release created by this
           # job (ownership verified above). A missing ref is fine.
           $refDelete = & gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag" 2>&1
           if ($LASTEXITCODE -ne 0) { Write-Host "Tag ref cleanup skipped (exit $LASTEXITCODE): $refDelete" }
-          Write-Host "Deleted incomplete draft release $tag (id $releaseId) created by this job."
+          Write-Host "Deleted incomplete release $tag (id $releaseId) created by this job."
 
   set-latest:
     # GitHub allows exactly ONE "Latest" release per repository. Parallel
