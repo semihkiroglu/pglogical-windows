@@ -495,8 +495,8 @@ jobs:
         run: |
           $tag = '${{ steps.tag.outputs.releaseTag }}'
           # "Get release by tag" does not return drafts; resolve via the list
-          # endpoint instead.
-          $id = gh release list --repo $env:GITHUB_REPOSITORY --json tagName,id --jq ".[] | select(.tagName == '$tag') | .id" | Select-Object -First 1
+          # endpoint instead (gh release list --json has no id field).
+          $id = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == '$tag') | .id" | Select-Object -First 1
           if ($LASTEXITCODE -ne 0 -or -not $id) { throw "Could not resolve the release ID for $tag after release creation." }
           "created=true" >> $env:GITHUB_OUTPUT
           "releaseId=$id" >> $env:GITHUB_OUTPUT
