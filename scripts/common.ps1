@@ -962,23 +962,62 @@ function New-BuildInfo {
 # ExitCode / Stdout / Stderr.
 $script:GhApiRunner = $null
 
+# Injectable native-process runner for tests. When set, Invoke-NativeProcess
+# calls it instead of System.Diagnostics.Process; it must return a hashtable
+# with ExitCode / Stdout / Stderr.
+$script:NativeProcessRunner = $null
+
+function Invoke-NativeProcess {
+    <#
+    .SYNOPSIS
+        Executes one external command exactly once, capturing stdout and
+        stderr independently via System.Diagnostics.Process. This is the
+        single production boundary for Invoke-GhApi (and the only place a
+        real process is started).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    if ($script:NativeProcessRunner) {
+        return & $script:NativeProcessRunner -FilePath $FilePath -Arguments $Arguments
+    }
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FilePath
+    foreach ($argument in $Arguments) { $psi.ArgumentList.Add($argument) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    $null = $process.Start()
+    # Read both streams before WaitForExit to avoid pipe-buffer deadlocks;
+    # gh api output is small (a single id/tag_name value).
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    return @{ ExitCode = $exitCode; Stdout = $stdout; Stderr = $stderr }
+}
+
 function Invoke-GhApi {
     <#
     .SYNOPSIS
-        Runs `gh api <args>` (or the injected test runner) and returns
-        @{ ExitCode; Stdout; Stderr }.
+        Runs `gh api <args>` exactly ONCE (or the injected test runner) and
+        returns @{ ExitCode; Stdout; Stderr } captured from that single
+        invocation. ExitCode, Stdout, and Stderr are always mutually
+        consistent - stderr can never come from a second, different
+        invocation.
     #>
     param([Parameter(Mandatory = $true)][string[]]$Args)
     if ($script:GhApiRunner) {
         return & $script:GhApiRunner -Args $Args
     }
-    $stdout = & gh api @Args 2> $null
-    $code = $LASTEXITCODE
-    $stderr = ''
-    if ($code -ne 0) {
-        $stderr = (& gh api @Args 2>&1 1> $null | Out-String) 2> $null
-    }
-    return @{ ExitCode = $code; Stdout = ($stdout | Out-String).TrimEnd(); Stderr = $stderr.Trim() }
+    $gh = (Get-Command gh -ErrorAction Stop).Source
+    $result = Invoke-NativeProcess -FilePath $gh -Arguments (@('api') + $Args)
+    return @{ ExitCode = $result.ExitCode; Stdout = $result.Stdout.TrimEnd(); Stderr = $result.Stderr.Trim() }
 }
 
 function Test-ExistingRelease {
