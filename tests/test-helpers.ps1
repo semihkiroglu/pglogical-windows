@@ -39,6 +39,14 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
+function Assert-False {
+    param(
+        [Parameter(Mandatory = $true)][bool]$Condition,
+        [string]$Message = 'expected condition to be false'
+    )
+    if ($Condition) { throw $Message }
+}
+
 function Assert-Equal {
     param(
         $Expected,

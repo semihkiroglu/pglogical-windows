@@ -419,19 +419,22 @@ jobs:
           $sums | Set-Content -Path artifacts/SHA256SUMS.txt -Encoding ascii
           Get-Content artifacts/SHA256SUMS.txt
 
-      - name: Check for an existing release
+      - name: Check for an existing release (fail closed)
         id: existing
-        shell: bash
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # $ErrorActionPreference=Stop, so a failing `gh release view`
-          # would abort the job. Use bash: exit code 0 with exists=false
-          # when the release is absent, exists=true when present.
-          if gh release view "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release already exists; skipping creation."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          . ./scripts/common.ps1
+          $tag = '${{ steps.tag.outputs.releaseTag }}'
+          $state = Test-ExistingRelease -Tag $tag -Repository $env:GITHUB_REPOSITORY
+          if ($state -eq 'absent') {
+            "exists=false" >> $env:GITHUB_OUTPUT
+            Write-Host "Release $tag does not exist; publication will proceed."
+          } else {
+            "exists=true" >> $env:GITHUB_OUTPUT
+            Write-Host "Release $tag already exists; skipping creation (idempotent no-op)."
+          }
 
       - name: Generate release body
         id: body
@@ -479,6 +482,20 @@ jobs:
             --title "pglogical $('${{ needs.resolve.outputs.version }}') — PostgreSQL ${{ matrix.entry.postgresqlMajor }} (built against ${{ matrix.entry.postgresqlBuildVersion }}, EDB revision ${{ matrix.entry.edbPackagingRevision }}) — windows.$('${{ matrix.entry.windowsPackagingRevision }}')" `
             --notes-file release-body.md
 
+      - name: Capture created release identity
+        if: steps.existing.outputs.exists == 'false'
+        id: created
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.tag.outputs.releaseTag }}'
+          $id = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" --jq '.id'
+          if ($LASTEXITCODE -ne 0 -or -not $id) { throw "Could not resolve the release ID for $tag after draft creation." }
+          "created=true" >> $env:GITHUB_OUTPUT
+          "releaseId=$id" >> $env:GITHUB_OUTPUT
+          Write-Host "Captured created release identity: $tag (id $id)"
+
       - name: Upload release assets
         if: steps.existing.outputs.exists == 'false'
         env:
@@ -503,12 +520,26 @@ jobs:
           gh release edit "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --draft=false
           gh release view "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft'
 
-      - name: Delete incomplete draft on failure
-        if: ${{ failure() && steps.existing.outputs.exists == 'false' }}
+      - name: Delete incomplete draft on failure (ownership-checked)
+        if: ${{ failure() && steps.existing.outputs.exists == 'false' && steps.created.outputs.created == 'true' }}
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          . ./scripts/common.ps1
+          $tag = '${{ steps.tag.outputs.releaseTag }}'
+          $releaseId = '${{ steps.created.outputs.releaseId }}'
+          if (-not (Test-ReleaseOwnership -Created '${{ steps.created.outputs.created }}' -ReleaseId $releaseId -Tag $tag -Repository $env:GITHUB_REPOSITORY)) {
+            Write-Host "Cleanup ownership cannot be proven for $tag (releaseId '$releaseId'); leaving the release and tag untouched."
+            exit 1
+          }
+          gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/releases/$releaseId"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to delete incomplete draft release $tag (id $releaseId)." }
+          # Remove the tag only for the incomplete release created by this
+          # job (ownership verified above). A missing ref is fine.
+          $refDelete = & gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag" --silent 2>&1
+          if ($LASTEXITCODE -ne 0) { Write-Host "Tag ref cleanup skipped (exit $LASTEXITCODE): $refDelete" }
+          Write-Host "Deleted incomplete draft release $tag (id $releaseId) created by this job."
 
   set-latest:
     # GitHub allows exactly ONE "Latest" release per repository. Parallel
@@ -553,6 +584,7 @@ jobs:
       issues: write
     steps:
       - name: Open issue for failed build
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
