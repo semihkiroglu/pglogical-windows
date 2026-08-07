@@ -221,3 +221,20 @@ jobs:
             -StagingDir "${{ steps.build.outputs.stage }}" `
             -UpstreamVersion "${{ needs.lint.outputs.baselineTag }}".Replace('REL', '').Replace('_', '.') `
             -AllowTemporaryLocalUser
+
+  # Ruleset compatibility: the ruleset requires the check
+  # "Windows build + smoke test (PostgreSQL 18)" on every PR. When the
+  # build-smoke job is skipped for a documentation-only change, its check
+  # run is registered under the unresolved name
+  # "Windows build + smoke test (PostgreSQL ${{ matrix.pgMajor }})" and can
+  # never satisfy the required check, blocking the merge. This job runs only
+  # when the build is deliberately skipped and reports the exact required
+  # check name. It never runs when build-smoke runs.
+  build-smoke-gate:
+    name: Windows build + smoke test (PostgreSQL 18)
+    needs: [changes]
+    if: ${{ needs.changes.outputs.build == 'false' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Documentation-only change
+        run: echo "Documentation-only change; Windows build + smoke test is not required."
