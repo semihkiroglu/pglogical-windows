@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/semihkiroglu/pglogical-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/semihkiroglu/pglogical-windows/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/semihkiroglu/pglogical-windows)](https://github.com/semihkiroglu/pglogical-windows/releases/latest)
-[![License](https://img.shields.io/github/license/semihkiroglu/pglogical-windows)](LICENSE)
+[![License](https://img.shields.io/badge/license-PostgreSQL%20License-2f6f4f)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078d6)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-336791)
 [![pglogical](https://img.shields.io/badge/pglogical-2.4.8-2f6f4f)](https://github.com/2ndQuadrant/pglogical)
