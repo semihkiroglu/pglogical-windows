@@ -1,17 +1,23 @@
-# Windows build fixes for pglogical 2.4.8.
+# Windows build fixes for pglogical 2.4.8 (upstream-PR variant).
 #
 # Derived from the Windows build patch contributed by ljackwilson in upstream
 # issue https://github.com/2ndQuadrant/pglogical/issues/442
 # (shared-memory startup-hook wiring for PostgreSQL 15+, additional
-# PGDLLEXPORT declarations, subscriber-tool fixes: random() -> rand(),
-# sys/stat.h exclusion on Windows, DWORD exit code, QuoteWindowsArgv cast).
-# The empty shared_preload_libraries change for the subscriber catchup start
-# is this project's own addition. See THIRD_PARTY_NOTICES.md.
+# PGDLLEXPORT declarations, DWORD exit code, QuoteWindowsArgv linkage fix),
+# which itself includes changes by the issue author MickeyYadav
+# (random() -> rand(), sys/stat.h exclusion on Windows, QuoteWindowsArgv cast).
+# Our own addition: the empty shared_preload_libraries change for the
+# subscriber catchup start.
+#
+# This variant wraps all Windows-only behavior in #ifdef WIN32 so non-Windows
+# builds are behavior-identical to upstream; debug logging is removed.
+# Verified: Windows CI build+smoke PG14-18 (MSVC/CMake), Linux build+e2e
+# PG14-18. See THIRD_PARTY_NOTICES.md.
 diff --git a/pglogical.c b/pglogical.c
-index 2e1209c..bae1d28 100644
+index 240886b..861280d 100644
 --- a/pglogical.c
 +++ b/pglogical.c
-@@ -98,7 +98,7 @@ static char *pglogical_temp_directory_config;
+@@ -105,7 +105,7 @@ static bool subowner_missing = false;
  shmem_request_hook_type prev_shmem_request_hook = NULL;
  #endif
  
@@ -20,23 +26,23 @@ index 2e1209c..bae1d28 100644
  void PGDLLEXPORT pglogical_supervisor_main(Datum main_arg);
  char *pglogical_extra_connection_options;
  
-@@ -657,6 +657,15 @@ start_manager_workers(void)
+@@ -701,6 +701,15 @@ start_manager_workers(void)
  void
  pglogical_supervisor_main(Datum main_arg)
  {
-+#if PG_VERSION_NUM >= 150000	
++#if defined(WIN32) && PG_VERSION_NUM >= 150000
 +	/* Don't overwrite if already set */
 +	if (shmem_startup_hook != pglogical_worker_shmem_startup)
 +	{
 +		prev_shmem_startup_hook = shmem_startup_hook;
 +		shmem_startup_hook = pglogical_worker_shmem_startup;
 +	}
-+#endif	
++#endif
 +
  	/* Establish signal handlers. */
  	pqsignal(SIGTERM, handle_sigterm);
  	BackgroundWorkerUnblockSignals();
-@@ -749,7 +758,7 @@ pglogical_temp_directory_assing_hook(const char *newval, void *extra)
+@@ -793,7 +802,7 @@ pglogical_temp_directory_assing_hook(const char *newval, void *extra)
  					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
  					 errmsg("could not locate temporary directory: %s\n",
  							!ret ? strerror(errno) : "")));
@@ -45,22 +51,23 @@ index 2e1209c..bae1d28 100644
  		}
  #endif
  
-@@ -859,6 +868,13 @@ _PG_init(void)
+@@ -912,6 +921,14 @@ _PG_init(void)
  #if PG_VERSION_NUM >= 150000
  	prev_shmem_request_hook = shmem_request_hook;
  	shmem_request_hook = pglogical_worker_shmem_init;
-+	
++#ifdef WIN32
 +	/* Don't overwrite if already set */
 +	if (shmem_startup_hook != pglogical_worker_shmem_startup)
 +	{
 +		prev_shmem_startup_hook = shmem_startup_hook;
 +		shmem_startup_hook = pglogical_worker_shmem_startup;
 +	}
++#endif
  #else
  	pglogical_worker_shmem_init();
  #endif
 diff --git a/pglogical_create_subscriber.c b/pglogical_create_subscriber.c
-index 117fc64..a0253e9 100644
+index 117fc64..76f7ef6 100644
 --- a/pglogical_create_subscriber.c
 +++ b/pglogical_create_subscriber.c
 @@ -24,7 +24,11 @@
@@ -84,20 +91,22 @@ index 117fc64..a0253e9 100644
  	if (pg_ctl_ret != 0)
  		die(_("Postgres startup for restore point catchup failed with %d. See pglogical_create_subscriber_postgres.log."), pg_ctl_ret);
  
-@@ -1856,6 +1860,6 @@ static char *
+@@ -1856,6 +1860,10 @@ static char *
  generate_restore_point_name(void)
  {
  	char *rpn = malloc(NAMEDATALEN);
--	snprintf(rpn, NAMEDATALEN-1, "pglogical_create_subscriber_%lx", random());
++#ifdef WIN32
 +	snprintf(rpn, NAMEDATALEN-1, "pglogical_create_subscriber_%x", rand());
++#else
+ 	snprintf(rpn, NAMEDATALEN-1, "pglogical_create_subscriber_%lx", random());
++#endif
  	return rpn;
  }
-
 diff --git a/pglogical_output.c b/pglogical_output.c
-index b24897e..48d3353 100644
+index 13ff3b4..6096a41 100644
 --- a/pglogical_output.c
 +++ b/pglogical_output.c
-@@ -19,7 +19,7 @@
+@@ -21,7 +21,7 @@
  
  PG_MODULE_MAGIC;
  
@@ -120,10 +129,10 @@ index 9f1bf9c..ebe0ead 100644
  static void pg_decode_startup(LogicalDecodingContext * ctx,
  							  OutputPluginOptions *opt, bool is_init);
 diff --git a/pglogical_sync.c b/pglogical_sync.c
-index c7ee4d4..ec4a33f 100644
+index 2b37d5c..a1cfe23 100644
 --- a/pglogical_sync.c
 +++ b/pglogical_sync.c
-@@ -2066,7 +2066,7 @@ QuoteWindowsArgvElement(StringInfo cmdline, const char *arg, bool force)
+@@ -2087,7 +2087,7 @@ QuoteWindowsArgvElement(StringInfo cmdline, const char *arg, bool force)
   * (This should arguably be part of libpq_fe.c, but I didn't want to expand our
   * abuse of PqExpBuffer.)
   */
@@ -132,16 +141,16 @@ index c7ee4d4..ec4a33f 100644
  QuoteWindowsArgv(StringInfo cmdline, const char * argv[])
  {
  	/* argv0 is required */
-@@ -2105,7 +2105,7 @@ static int
+@@ -2126,7 +2126,7 @@ static int
  exec_cmd_win32(const char *cmd, char *cmdargv[])
  {
  	BOOL					ret;
 -	int						exitcode = -1;
-+	DWORD						exitcode = -1;
++	DWORD					exitcode = -1;
  	PROCESS_INFORMATION 	pi;
  
  	elog(DEBUG1, "trying to launch \"%s\"", cmd);
-@@ -2118,7 +2118,7 @@ exec_cmd_win32(const char *cmd, char *cmdargv[])
+@@ -2139,7 +2139,7 @@ exec_cmd_win32(const char *cmd, char *cmdargv[])
  
  		/* Deal with insane windows command line quoting */
  		initStringInfo(&cmdline);
@@ -151,150 +160,89 @@ index c7ee4d4..ec4a33f 100644
  		/* CreateProcess may scribble on the cmd string */
  		cmd_tmp = pstrdup(cmd);
 diff --git a/pglogical_worker.c b/pglogical_worker.c
-index 6a93426..1ac3722 100644
+index fb43c55..b869e60 100644
 --- a/pglogical_worker.c
 +++ b/pglogical_worker.c
-@@ -43,8 +43,7 @@ typedef struct signal_worker_item
- static	List *signal_workers = NIL;
+@@ -45,7 +45,7 @@ static	List *signal_workers = NIL;
  
  volatile sig_atomic_t	got_SIGTERM = false;
--
+ 
 -PGLogicalContext	   *PGLogicalCtx = NULL;
-+PGDLLEXPORT PGLogicalContext      *PGLogicalCtx = NULL;
++PGDLLEXPORT PGLogicalContext	   *PGLogicalCtx = NULL;
  PGLogicalWorker		   *MyPGLogicalWorker = NULL;
  static uint16			MyPGLogicalWorkerGeneration;
  
-@@ -52,14 +51,13 @@ static bool xacthook_signal_workers = false;
+@@ -53,7 +53,11 @@ static bool xacthook_signal_workers = false;
  static bool xact_cb_installed = false;
  
  
--static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
++#ifdef WIN32
 +shmem_startup_hook_type prev_shmem_startup_hook = NULL;
++#else
+ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
++#endif
  
  static void pglogical_worker_detach(bool crash);
  static void wait_for_worker_startup(PGLogicalWorker *worker,
- 									BackgroundWorkerHandle *handle);
- static void signal_worker_xact_callback(XactEvent event, void *arg);
- 
--
- void
- handle_sigterm(SIGNAL_ARGS)
- {
-@@ -654,7 +652,7 @@ pglogical_subscription_changed(Oid subid, bool kill)
- 	xacthook_signal_workers = true;
- }
- 
--static size_t
-+Size
- worker_shmem_size(int nworkers)
- {
- 	return offsetof(PGLogicalContext, workers) +
-@@ -664,16 +662,31 @@ worker_shmem_size(int nworkers)
+@@ -680,14 +684,31 @@ worker_shmem_size(int nworkers)
  /*
   * Init shmem needed for workers.
   */
--static void
++#ifdef WIN32
 +void
++#else
+ static void
++#endif
  pglogical_worker_shmem_startup(void)
  {
  	bool        found;
  	int			nworkers;
-+#if PG_VERSION_NUM >= 150000
++#ifdef WIN32
 +	static bool already_attached = false;
 +#endif
  
--	if (prev_shmem_startup_hook != NULL)
-+	elog(DEBUG2, "pglogical: [pglogical_worker_shmem_startup] called");
-+#if PG_VERSION_NUM >= 150000
++#ifdef WIN32
++	/* Chained hook must not recurse into our own hook on re-registration. */
 +	if (prev_shmem_startup_hook && prev_shmem_startup_hook != pglogical_worker_shmem_startup)
-+	{
- 		prev_shmem_startup_hook();
-+	}
-+	// Only log once per process
-+   
-+    if (already_attached)
-+	{
-+        return;
-+	}
++		prev_shmem_startup_hook();
++	/* Windows children re-initialize shared memory; init the context once. */
++	if (already_attached)
++		return;
 +	already_attached = true;
-+#endif	
++#else
+ 	if (prev_shmem_startup_hook != NULL)
+ 		prev_shmem_startup_hook();
++#endif
  
--	/*
-+   	/*
+ 	/*
  	 * This is kludge for Windows (Postgres does not define the GUC variable
- 	 * as PGDLLIMPORT)
- 	 */
-@@ -683,7 +696,15 @@ pglogical_worker_shmem_startup(void)
- 	/* Init signaling context for the various processes. */
+@@ -700,6 +721,11 @@ pglogical_worker_shmem_startup(void)
  	PGLogicalCtx = ShmemInitStruct("pglogical_context",
  								   worker_shmem_size(nworkers), &found);
--
-+	
+ 
++#ifdef WIN32
 +	if (!PGLogicalCtx)
-+	{
-+		elog(DEBUG2, "pglogical: [pglogical_worker_shmem_startup] pglogical_worker_shmem_startup: ShmemInitStruct returned NULL!");
 +		return;
-+	}
-+	
-+	elog(DEBUG2, "pglogical: [pglogical_worker_shmem_startup] PGLogicalCtx init complete, found=%s", found ? "true" : "false");
-+	
++#endif
++
  	if (!found)
  	{
  		PGLogicalCtx->lock = &(GetNamedLWLockTranche("pglogical"))->lock;
-@@ -693,6 +714,9 @@ pglogical_worker_shmem_startup(void)
- 		memset(PGLogicalCtx->workers, 0,
- 			   sizeof(PGLogicalWorker) * PGLogicalCtx->total_workers);
- 	}
-+	
-+	elog(DEBUG2, "pglogical: [pglogical_worker_shmem_startup] PGLogicalCtx initialized at %p", PGLogicalCtx);
-+
- }
- 
- /*
-@@ -703,6 +727,8 @@ pglogical_worker_shmem_init(void)
- {
- 	int			nworkers;
- 
-+	elog(DEBUG2, "pglogical: [pglogical_worker_shmem_init] called");
-+
- #if PG_VERSION_NUM >= 150000
- 	if (prev_shmem_request_hook)
- 		prev_shmem_request_hook();
 diff --git a/pglogical_worker.h b/pglogical_worker.h
-index f8c62d9..ba76daf 100644
+index b9384b1..1135213 100644
 --- a/pglogical_worker.h
 +++ b/pglogical_worker.h
-@@ -17,6 +17,9 @@
+@@ -17,6 +17,13 @@
  
  #include "pglogical.h"
  
-+#include "storage/ipc.h"  // defines shmem_startup_hook_type
++#ifdef WIN32
++#include "storage/ipc.h"	/* defines shmem_startup_hook_type */
 +
++extern void PGDLLEXPORT pglogical_worker_shmem_startup(void);
++extern PGDLLEXPORT shmem_startup_hook_type prev_shmem_startup_hook;
++#endif
 +
  typedef enum {
  	PGLOGICAL_WORKER_NONE,		/* Unused slot. */
  	PGLOGICAL_WORKER_MANAGER,	/* Manager. */
-@@ -78,11 +81,13 @@ typedef struct PGLogicalContext {
- 	PGLogicalWorker  workers[FLEXIBLE_ARRAY_MEMBER];
- } PGLogicalContext;
- 
--extern PGLogicalContext		   *PGLogicalCtx;
-+extern PGDLLEXPORT PGLogicalContext		   *PGLogicalCtx;
- extern PGLogicalWorker		   *MyPGLogicalWorker;
- extern PGLogicalApplyWorker	   *MyApplyWorker;
- extern PGLogicalSubscription   *MySubscription;
- 
-+extern PGDLLEXPORT Size worker_shmem_size(int nworkers);
-+
- extern volatile sig_atomic_t got_SIGTERM;
- 
- extern void handle_sigterm(SIGNAL_ARGS);
-@@ -107,5 +112,8 @@ extern bool pglogical_worker_running(PGLogicalWorker *w);
- extern void pglogical_worker_kill(PGLogicalWorker *worker);
- 
- extern const char * pglogical_worker_type_name(PGLogicalWorkerType type);
-+extern void PGDLLEXPORT pglogical_worker_shmem_startup(void);
-+extern PGDLLEXPORT shmem_startup_hook_type prev_shmem_startup_hook;
-+
- 
- #endif /* PGLOGICAL_WORKER_H */
