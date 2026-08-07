@@ -1,10 +1,10 @@
 # pglogical for Windows
 
 [![CI](https://github.com/semihkiroglu/pglogical-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/semihkiroglu/pglogical-windows/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/semihkiroglu/pglogical-windows)](https://github.com/semihkiroglu/pglogical-windows/releases/latest)
+[![Releases](https://img.shields.io/badge/releases-download-2f6f4f)](https://github.com/semihkiroglu/pglogical-windows/releases)
 [![License](https://img.shields.io/badge/license-PostgreSQL%20License-2f6f4f)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078d6)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-336791)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078d6)](BUILDING.md)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-336791)](#compatibility)
 [![pglogical](https://img.shields.io/badge/pglogical-2.4.8-2f6f4f)](https://github.com/2ndQuadrant/pglogical)
 
 Unofficial Windows x64 packages of the [pglogical](https://github.com/2ndQuadrant/pglogical)
@@ -12,15 +12,12 @@ PostgreSQL logical replication extension, built with CMake + MSVC against
 official EnterpriseDB PostgreSQL Windows installations.
 
 **This is an unofficial packaging project.** The packages are produced by an
-independent, out-of-tree build of the upstream pglogical source. They are not
-published, endorsed, or supported by EnterpriseDB, 2ndQuadrant, or the
-PostgreSQL Global Development Group.
-
-The upstream pglogical repository is **not forked or vendored**. Windows-specific
-patches, when needed, are applied only to the ephemeral build checkout; every
-build clones the exact upstream release tag. This repository is independent of
-EnterpriseDB, the PostgreSQL project, 2ndQuadrant, and the upstream pglogical
-maintainers.
+independent, out-of-tree build of the upstream pglogical source, which is
+**not forked or vendored** here: every build clones the exact upstream release
+tag, and Windows-specific patches, when needed, are applied only to the
+ephemeral build checkout. The packages are not published, endorsed, or
+supported by EnterpriseDB, 2ndQuadrant, the PostgreSQL Global Development
+Group, or the upstream pglogical maintainers.
 
 ## Why this repository exists
 
@@ -165,11 +162,18 @@ For more detail see [SECURITY.md](SECURITY.md) and [RELEASING.md](RELEASING.md).
 
 ## Building from source
 
-Prerequisites: Windows x64, PowerShell 7, Visual Studio 2022+ with the
-"Desktop development with C++" workload **and the "C++ Clang tools for
-Windows" component** (the build compiles with clang-cl — see BUILDING.md for
-why), CMake >= 3.24, and an official PostgreSQL Windows installation (or run
-`scripts/Install-PostgreSql.ps1` to fetch one into an isolated directory).
+Prerequisites:
+
+- **Windows:** x64
+- **PowerShell:** 7.x
+- **Visual Studio:** 2022+ with the "Desktop development with C++" workload
+  and the "C++ Clang tools for Windows" component
+- **CMake:** >= 3.24
+- **PostgreSQL:** a matching official Windows installation, or run
+  `scripts/Install-PostgreSql.ps1` to fetch one into an isolated directory
+
+The build compiles with clang-cl using the Visual Studio/MSVC toolchain; see
+BUILDING.md for the rationale.
 
 ```powershell
 # One-shot: download PG 18 into .pg\installs, clone REL2_4_8,
