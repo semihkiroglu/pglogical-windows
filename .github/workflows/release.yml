@@ -470,34 +470,18 @@ jobs:
           $body | Set-Content -Path release-body.md -Encoding utf8
           "bodyFile=$env:GITHUB_WORKSPACE/release-body.md" >> $env:GITHUB_OUTPUT
 
-      - name: Create release tag
-        # GitHub no longer creates a git tag when a draft release is created;
-        # the rest of this job resolves releases by tag, so create the tag
-        # explicitly first. 422 (already exists) is fine.
-        if: steps.existing.outputs.exists == 'false'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="${{ steps.tag.outputs.releaseTag }}"
-          if ! gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA" >/dev/null 2>&1; then
-            echo "Tag $tag already exists or could not be created; continuing."
-          fi
-
-      - name: Create release
+      - name: Create draft release
         if: steps.existing.outputs.exists == 'false'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $releaseTag = '${{ steps.tag.outputs.releaseTag }}'
-          # NOTE: no --draft. GitHub's "get release by tag" endpoint does not
-          # return draft releases (drafts no longer get a git tag link), which
-          # breaks every tag-based step that follows. Create the release
-          # directly; the ownership-checked cleanup step still removes it on
-          # failure.
-          gh release create $releaseTag --repo $env:GITHUB_REPOSITORY `
+          # Draft is required: GitHub rejects asset uploads to published
+          # ("immutable") releases. Drafts no longer get a git tag, so the
+          # tag-based steps below use the release ID (list endpoint) instead.
+          # The git tag is created by GitHub when the draft is published.
+          gh release create $releaseTag --repo $env:GITHUB_REPOSITORY --draft `
             --target $env:GITHUB_SHA `
             --title "pglogical $('${{ needs.resolve.outputs.version }}') — PostgreSQL ${{ matrix.entry.postgresqlMajor }} (built against ${{ matrix.entry.postgresqlBuildVersion }}, EDB revision ${{ matrix.entry.edbPackagingRevision }}) — windows.$('${{ matrix.entry.windowsPackagingRevision }}')" `
             --notes-file release-body.md
@@ -510,7 +494,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ steps.tag.outputs.releaseTag }}'
-          $id = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" --jq '.id'
+          # "Get release by tag" does not return drafts; resolve via the list
+          # endpoint instead.
+          $id = gh release list --repo $env:GITHUB_REPOSITORY --json tagName,id --jq ".[] | select(.tagName == '$tag') | .id" | Select-Object -First 1
           if ($LASTEXITCODE -ne 0 -or -not $id) { throw "Could not resolve the release ID for $tag after release creation." }
           "created=true" >> $env:GITHUB_OUTPUT
           "releaseId=$id" >> $env:GITHUB_OUTPUT
@@ -522,9 +508,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          tag="${{ steps.tag.outputs.releaseTag }}"
-          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" artifacts/*.zip artifacts/SHA256SUMS.txt
-          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
+          # gh release upload resolves by tag, which does not work for
+          # drafts; upload via the release assets REST API instead.
+          releaseId="${{ steps.created.outputs.releaseId }}"
+          for f in artifacts/*.zip artifacts/SHA256SUMS.txt; do
+            name=$(basename "$f")
+            gh api -X POST -H "Content-Type: application/octet-stream" --input "$f" \
+              "repos/$GITHUB_REPOSITORY/releases/$releaseId/assets?name=$name" --jq '.name' || exit 1
+          done
+          gh api "repos/$GITHUB_REPOSITORY/releases/$releaseId/assets" --jq '.[].name'
 
       - name: Generate artifact attestation
         if: steps.existing.outputs.exists == 'false'
@@ -532,12 +524,15 @@ jobs:
         with:
           subject-path: artifacts/*.zip
 
-      - name: Verify release is published
+      - name: Publish release
         if: steps.existing.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          releaseId="${{ steps.created.outputs.releaseId }}"
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$releaseId" -f draft=false --jq '.draft'
+          # Publishing creates the git tag; verify the tag-based lookup works.
           isDraft=$(gh release view "${{ steps.tag.outputs.releaseTag }}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
           echo "isDraft=$isDraft"
           if [ "$isDraft" != "false" ]; then echo "Release is still a draft"; exit 1; fi
