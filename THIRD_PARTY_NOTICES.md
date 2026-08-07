@@ -37,6 +37,24 @@ The PostgreSQL License (SPDX: `PostgreSQL`):
 > ON AN "AS IS" BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS
 > TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
 
+## Windows build patch (derived work)
+
+The build applies `patches/pglogical-2.4.8-windows.patch` to the ephemeral
+upstream checkout. The patch is derived from the Windows build patch
+contributed by **ljackwilson** in upstream issue
+[#442](https://github.com/2ndQuadrant/pglogical/issues/442)
+("Getting this error 'The specified module could not be found.' on creating
+extension pglogical on windows"), in particular:
+
+* shared-memory startup-hook wiring for PostgreSQL 15+;
+* additional `PGDLLEXPORT` declarations;
+* subscriber-tool fixes (`random()` -> `rand()`, `sys/stat.h` exclusion on
+  Windows, `DWORD` exit code, `QuoteWindowsArgv` cast).
+
+The empty `shared_preload_libraries` change for the subscriber catchup start
+is an addition by this project. The original patch is distributed under the
+same PostgreSQL License as upstream pglogical.
+
 ## PostgreSQL (runtime target)
 
 The packages are built against, and are designed to be installed into,

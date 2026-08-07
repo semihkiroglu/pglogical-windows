@@ -1,3 +1,12 @@
+# Windows build fixes for pglogical 2.4.8.
+#
+# Derived from the Windows build patch contributed by ljackwilson in upstream
+# issue https://github.com/2ndQuadrant/pglogical/issues/442
+# (shared-memory startup-hook wiring for PostgreSQL 15+, additional
+# PGDLLEXPORT declarations, subscriber-tool fixes: random() -> rand(),
+# sys/stat.h exclusion on Windows, DWORD exit code, QuoteWindowsArgv cast).
+# The empty shared_preload_libraries change for the subscriber catchup start
+# is this project's own addition. See THIRD_PARTY_NOTICES.md.
 diff --git a/pglogical.c b/pglogical.c
 index 2e1209c..bae1d28 100644
 --- a/pglogical.c
