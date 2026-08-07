@@ -1,0 +1,87 @@
+name: Build problem
+description: Report a failure building or packaging pglogical for Windows from source
+title: "[Build]: "
+labels: ["build"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a build problem!
+
+        > **Warning:** Do not paste passwords, tokens, or other secrets.
+        > Redact any sensitive information in logs.
+  - type: input
+    id: branch
+    attributes:
+      label: Branch / commit
+      description: Repository branch and commit you built from
+      placeholder: "main"
+    validations:
+      required: true
+  - type: input
+    id: postgresql-version
+    attributes:
+      label: PostgreSQL version
+      description: e.g. 18.4 (EDB Windows x64)
+      placeholder: "18.4"
+    validations:
+      required: true
+  - type: input
+    id: edb-artifact
+    attributes:
+      label: EDB artifact filename (if relevant)
+      description: e.g. postgresql-18.4-2-windows-x64-binaries.zip
+    validations:
+      required: false
+  - type: input
+    id: visual-studio
+    attributes:
+      label: Visual Studio version
+      placeholder: "Visual Studio 2022 17.x"
+    validations:
+      required: false
+  - type: input
+    id: clang-cl
+    attributes:
+      label: clang-cl version
+      placeholder: "17.0.x"
+    validations:
+      required: false
+  - type: input
+    id: cmake
+    attributes:
+      label: CMake version
+      placeholder: "3.24+"
+    validations:
+      required: false
+  - type: input
+    id: powershell
+    attributes:
+      label: PowerShell version
+      placeholder: "7.4.x"
+    validations:
+      required: false
+  - type: input
+    id: failing-command
+    attributes:
+      label: Failing command
+      description: The exact command that failed
+    validations:
+      required: true
+  - type: textarea
+    id: error-output
+    attributes:
+      label: Relevant error output
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: ci-status
+    attributes:
+      label: Does repository CI pass on this branch?
+      options:
+        - "Yes, CI passes"
+        - "No, CI fails too"
+        - "Not checked"
+    validations:
+      required: false

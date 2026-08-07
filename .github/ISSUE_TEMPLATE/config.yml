@@ -1,0 +1,4 @@
+# Blank issues are disabled so reports arrive through the structured
+# templates (bug report, build problem) with the information needed to
+# act on them. For security reports, use SECURITY.md instead.
+blank_issues_enabled: false

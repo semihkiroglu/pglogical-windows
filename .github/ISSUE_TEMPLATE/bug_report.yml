@@ -1,0 +1,98 @@
+name: Bug report
+description: Report a problem with a pglogical Windows package or its runtime behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+
+        > **Warning:** Do not paste passwords, connection strings with
+        > credentials, private database contents, or any other sensitive
+        > information. Redact hostnames, usernames, ports, and anything else
+        > that could identify or expose your environment.
+  - type: input
+    id: pglogical-version
+    attributes:
+      label: pglogical version
+      description: Version shown in the package filename, e.g. 2.4.8
+      placeholder: "2.4.8"
+    validations:
+      required: true
+  - type: input
+    id: postgresql-version
+    attributes:
+      label: PostgreSQL exact version
+      description: e.g. 18.4 — run SELECT version();
+      placeholder: "18.4"
+    validations:
+      required: true
+  - type: input
+    id: package-filename
+    attributes:
+      label: Package filename
+      description: Exact ZIP filename you installed
+      placeholder: "pglogical-2.4.8-pg18.4-edb2-windows-x64.zip"
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      description: e.g. Windows 11 23H2, Windows Server 2022
+      placeholder: "Windows 11"
+    validations:
+      required: false
+  - type: input
+    id: install-method
+    attributes:
+      label: Installation method / path
+      description: EDB installer or manual extraction, and the installation root
+      placeholder: "C:\\Program Files\\PostgreSQL\\18"
+    validations:
+      required: false
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Steps to reproduce the problem
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error text if any
+    validations:
+      required: true
+  - type: textarea
+    id: pg-log
+    attributes:
+      label: PostgreSQL log excerpt
+      description: Relevant lines from the PostgreSQL server log. Redact any sensitive information.
+      render: shell
+    validations:
+      required: false
+  - type: dropdown
+    id: upstream-repro
+    attributes:
+      label: Does this reproduce with upstream (non-Windows) pglogical?
+      description: If known — e.g. with upstream pglogical on Linux
+      options:
+        - "Not tested"
+        - "Yes, reproduces with upstream pglogical"
+        - "No, only with these Windows packages"
+        - "Cannot test (no non-Windows environment)"
+    validations:
+      required: false
