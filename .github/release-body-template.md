@@ -22,7 +22,7 @@
 
 `pglogical-{{VERSION}}-pg{{PG_MAJOR}}.{{PG_MINOR}}-edb{{EDB_REVISION}}-windows-x64.zip`
 
-The package ZIP name and the embedded `BUILD-INFO.json` identify the exact PostgreSQL build version and EDB packaging revision; the GitHub release tag represents the PostgreSQL compatibility major release stream.
+The package ZIP name and the embedded `BUILD-INFO.json` identify the exact PostgreSQL build version and EDB packaging revision; the GitHub release tag represents the PostgreSQL compatibility major release stream. Despite the exact build version in the asset name, this package runs on **any** minor of PostgreSQL {{PG_MAJOR}}: PostgreSQL guarantees binary compatibility within a major version, and the server's module magic-block check is major-granular.
 
 Unzip into a matching PostgreSQL installation directory (e.g. `C:\Program Files\PostgreSQL\{{PG_MAJOR}}`) so that `lib\`, `share\extension\`, and `bin\` merge with the existing layout. Install on both provider and subscriber nodes.
 

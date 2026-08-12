@@ -78,7 +78,10 @@ can only be enabled deliberately via `.github/pg-versions.json`.
 
 The exact build version of every package — PostgreSQL minor and EDB packaging
 revision — is recorded in the asset filename, the release provenance table, and
-the embedded `BUILD-INFO.json`.
+the embedded `BUILD-INFO.json`. That minor is a build-input identifier, not a
+compatibility claim: each package runs on **any** minor of its PostgreSQL
+major, because PostgreSQL guarantees binary compatibility within a major
+version (the server's module magic-block check is major-granular).
 
 Architecture: **x64 only**. Configuration: **Release only**. The extension is
 only as compatible with your PostgreSQL version as the upstream source is.
