@@ -11,8 +11,9 @@
       1. verifies the PostgreSQL version of PG_ROOT;
       2. copies the staged package into the isolated installation;
       3. initdb into a temporary data directory;
-      4. configures wal_level=logical, worker/sender/slot counts, and
-         shared_preload_libraries='pglogical';
+      4. configures wal_level=logical, worker/sender/slot counts,
+         shared_preload_libraries='pglogical', and (when supported)
+         output_plugin_libraries including pglogical_output;
       5. starts PostgreSQL with pg_ctl;
       6. CREATE EXTENSION pglogical and verifies extversion;
       7. creates and drops a temporary logical replication slot using
@@ -388,7 +389,7 @@ try {
     # -----------------------------------------------------------------------
     Write-Host "== Step 4: configuration"
     $conf = Join-Path $dataDir 'postgresql.conf'
-    @(
+    $configLines = @(
         "wal_level = logical",
         "max_worker_processes = 16",
         "max_replication_slots = 10",
@@ -396,7 +397,15 @@ try {
         "shared_preload_libraries = 'pglogical'",
         "listen_addresses = '127.0.0.1'",
         "logging_collector = off"
-    ) | Add-Content -Path $conf -Encoding utf8
+    )
+    if (Test-PgLogicalOutputPluginGucSupported -PgMajor $pgMajor -PgMinor $pgMinor) {
+        # This GUC must be in postgresql.conf before the postmaster starts;
+        # changing it from the already-open test session is not sufficient for
+        # logical slot creation.
+        $configLines += "output_plugin_libraries = 'pgoutput, test_decoding, pglogical_output'"
+        Write-Host '   configured output_plugin_libraries for pglogical_output'
+    }
+    $configLines | Add-Content -Path $conf -Encoding utf8
 
     # Pick a free port.
     $port = Get-FreePort
@@ -470,6 +479,8 @@ try {
         # -------------------------------------------------------------------
         Write-Host '== Step 6: CREATE EXTENSION pglogical'
         $psql = Join-Path $binDir 'psql.exe'
+        $null = Test-PgLogicalOutputPluginConfigured -PsqlPath $psql -PgHost '127.0.0.1' -Port $port
+
         $sql = "CREATE EXTENSION pglogical;"
         $out = & $psql -X -h 127.0.0.1 -p $port -U postgres -d postgres -v ON_ERROR_STOP=1 -c $sql 2>&1
         if ($LASTEXITCODE -ne 0) { Fail-Step "CREATE EXTENSION failed: $out"; throw 'create extension failed' }

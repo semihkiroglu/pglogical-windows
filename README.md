@@ -52,6 +52,24 @@ The pipeline runs on GitHub Actions:
    wal_level = logical
    ```
 
+   PostgreSQL 14.24, 15.19, 16.15, 17.11, and 18.6 introduced the
+   `output_plugin_libraries` security whitelist. On those versions and later,
+   add `pglogical_output` on every node that can create pglogical logical
+   replication slots (normally the provider):
+
+   ```conf
+   output_plugin_libraries = 'pgoutput, test_decoding, pglogical_output'
+   ```
+
+   Preserve any existing trusted entries when extending a custom whitelist;
+   do not replace it blindly. Older PostgreSQL minors that do not expose this
+   setting should omit the line. The setting is required because PostgreSQL
+   now rejects unlisted logical decoding output plugins (CVE-2026-6471).
+
+   **Türkçe:** PostgreSQL 14.24/15.19/16.15/17.11/18.6 ve sonraki sürümlerde
+   provider üzerinde `pglogical_output` whitelist'e eklenmelidir. Mevcut özel
+   liste varsa üzerine yazmayın; plugin'i mevcut güvenilir listeye ekleyin.
+
 5. Restart PostgreSQL.
 6. Run `CREATE EXTENSION pglogical;` on each database that needs it.
 

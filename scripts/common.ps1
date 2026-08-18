@@ -1002,6 +1002,72 @@ function Invoke-NativeProcess {
     return @{ ExitCode = $exitCode; Stdout = $stdout; Stderr = $stderr }
 }
 
+function Test-PgLogicalOutputPluginGucSupported {
+    <#
+    .SYNOPSIS
+        Identifies PostgreSQL minors that include output_plugin_libraries.
+
+    .DESCRIPTION
+        PostgreSQL's August 2026 security releases added this GUC to the
+        supported branches. It must be present before the postmaster starts;
+        changing it from an existing session is not sufficient for the slot
+        creation path.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][int]$PgMajor,
+        [Parameter(Mandatory = $true)][int]$PgMinor
+    )
+
+    $minimumMinor = @{
+        14 = 24
+        15 = 19
+        16 = 15
+        17 = 11
+        18 = 6
+    }
+    return $minimumMinor.ContainsKey($PgMajor) -and $PgMinor -ge [int]$minimumMinor[$PgMajor]
+}
+
+function Test-PgLogicalOutputPluginConfigured {
+    <#
+    .SYNOPSIS
+        Verifies that pglogical_output is in the server allow-list.
+
+    .DESCRIPTION
+        The caller writes output_plugin_libraries to postgresql.conf before
+        starting PostgreSQL. This query only verifies the effective setting;
+        it deliberately does not use ALTER SYSTEM because an existing backend
+        can still reject a logical slot after a session-level reload.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$PsqlPath,
+        [Parameter(Mandatory = $true)][string]$PgHost,
+        [Parameter(Mandatory = $true)][string]$Port,
+        [string]$User = 'postgres',
+        [string]$Database = 'postgres'
+    )
+
+    $baseArgs = @('-X', '-h', $PgHost, '-p', $Port, '-U', $User, '-d', $Database, '-v', 'ON_ERROR_STOP=1')
+    $verifySql = "SELECT setting FROM pg_settings WHERE name = 'output_plugin_libraries';"
+    $verify = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-t', '-A', '-c', $verifySql))
+    if ($verify.ExitCode -ne 0) {
+        throw "Could not verify output_plugin_libraries: $($verify.Stderr.Trim())"
+    }
+
+    $normalizedSetting = [string]$verify.Stdout
+    $normalizedSetting = $normalizedSetting.Replace("`r", '').Replace("`n", '').Replace('"', '')
+    if ([string]::IsNullOrWhiteSpace($normalizedSetting)) {
+        Write-Host '   output_plugin_libraries is not available on this PostgreSQL minor; no whitelist verification needed'
+        return $false
+    }
+    $plugins = @($normalizedSetting -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($plugins -notcontains 'pglogical_output') {
+        throw "output_plugin_libraries does not contain pglogical_output (actual: $normalizedSetting)"
+    }
+    Write-Host "   output_plugin_libraries configured: $normalizedSetting"
+    return $true
+}
+
 function Invoke-GhApi {
     <#
     .SYNOPSIS
@@ -1018,6 +1084,25 @@ function Invoke-GhApi {
     $gh = (Get-Command gh -ErrorAction Stop).Source
     $result = Invoke-NativeProcess -FilePath $gh -Arguments (@('api') + $Args)
     return @{ ExitCode = $result.ExitCode; Stdout = $result.Stdout.TrimEnd(); Stderr = $result.Stderr.Trim() }
+}
+
+function Get-ReleaseFailureMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$UpstreamTag
+    )
+    return "<!-- pglogical-build-failure: $Version/$UpstreamTag -->"
+}
+
+function Find-ExistingReleaseFailureIssue {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Issues,
+        [Parameter(Mandatory = $true)][string]$Marker
+    )
+    foreach ($issue in @($Issues)) {
+        if ([string]$issue.body -like "*$Marker*") { return $issue }
+    }
+    return $null
 }
 
 function Test-ExistingRelease {
