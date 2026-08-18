@@ -1059,11 +1059,13 @@ function Configure-PglogicalOutputPlugin {
     if ($verify.ExitCode -ne 0) {
         throw "Could not verify output_plugin_libraries after reload: $($verify.Stderr.Trim())"
     }
-    $plugins = @($verify.Stdout -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $normalizedSetting = [string]$verify.Stdout
+    $normalizedSetting = $normalizedSetting.Replace("`r", '').Replace("`n", '').Replace('"', '')
+    $plugins = @($normalizedSetting -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     if ($plugins -notcontains 'pglogical_output') {
-        throw "output_plugin_libraries was reloaded but does not contain pglogical_output (actual: $($verify.Stdout.Trim()))"
+        throw "output_plugin_libraries was reloaded but does not contain pglogical_output (actual: $normalizedSetting)"
     }
-    Write-Host "   output_plugin_libraries configured: $($verify.Stdout.Trim())"
+    Write-Host "   output_plugin_libraries configured: $normalizedSetting"
     return $true
 }
 

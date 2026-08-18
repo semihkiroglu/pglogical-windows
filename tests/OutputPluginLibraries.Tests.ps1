@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 $script:NativeCalls = @()
 $script:OutputPluginGucSupported = $true
 $script:OutputPluginSetting = 'pgoutput, test_decoding, wal2json'
-$script:OutputPluginSettingAfterAlter = 'pgoutput, test_decoding, wal2json, pglogical_output'
+$script:OutputPluginSettingAfterAlter = "`"pgoutput, test_decoding, wal2json,`r`n pglogical_output`""
 
 function Invoke-FakeOutputPluginNativeProcess {
     param(
@@ -50,7 +50,7 @@ Test-Case 'supported PostgreSQL config appends pglogical_output without dropping
     $script:NativeCalls = @()
     $script:OutputPluginGucSupported = $true
     $script:OutputPluginSetting = 'pgoutput, test_decoding, wal2json'
-    $script:OutputPluginSettingAfterAlter = 'pgoutput, test_decoding, wal2json, pglogical_output'
+    $script:OutputPluginSettingAfterAlter = "`"pgoutput, test_decoding, wal2json,`r`n pglogical_output`""
 
     $configured = Configure-PglogicalOutputPlugin -PsqlPath 'psql.exe' -PgHost '127.0.0.1' -Port '5432'
 
