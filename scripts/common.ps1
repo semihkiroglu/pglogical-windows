@@ -1002,6 +1002,64 @@ function Invoke-NativeProcess {
     return @{ ExitCode = $exitCode; Stdout = $stdout; Stderr = $stderr }
 }
 
+function Configure-PglogicalOutputPlugin {
+    <#
+    .SYNOPSIS
+        Allows pglogical_output on PostgreSQL versions that implement the
+        output_plugin_libraries security GUC.
+
+    .DESCRIPTION
+        PostgreSQL's August 2026 security releases added an output-plugin
+        whitelist. Older minors do not know this GUC, so probe pg_settings
+        first instead of putting an unknown setting into postgresql.conf.
+        The built-in plugins remain in the allow-list deliberately.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$PsqlPath,
+        [Parameter(Mandatory = $true)][string]$PgHost,
+        [Parameter(Mandatory = $true)][string]$Port,
+        [string]$User = 'postgres',
+        [string]$Database = 'postgres'
+    )
+
+    $baseArgs = @('-X', '-h', $PgHost, '-p', $Port, '-U', $User, '-d', $Database, '-v', 'ON_ERROR_STOP=1')
+    $probeSql = "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_settings WHERE name = 'output_plugin_libraries') THEN '1' ELSE '0' END;"
+    $probe = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-t', '-A', '-c', $probeSql))
+    if ($probe.ExitCode -ne 0) {
+        throw "Could not probe output_plugin_libraries support: $($probe.Stderr.Trim())"
+    }
+    $supported = (($probe.Stdout -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1).Trim() -eq '1')
+    if (-not $supported) {
+        Write-Host '   output_plugin_libraries is not available on this PostgreSQL minor; no whitelist change needed'
+        return $false
+    }
+
+    $currentSql = "SELECT setting FROM pg_settings WHERE name = 'output_plugin_libraries';"
+    $current = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-t', '-A', '-c', $currentSql))
+    if ($current.ExitCode -ne 0) {
+        throw "Could not read output_plugin_libraries before configuration: $($current.Stderr.Trim())"
+    }
+    $currentPlugins = @($current.Stdout -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $allowList = @($currentPlugins + 'pglogical_output' | Select-Object -Unique) -join ', '
+    $setSql = "ALTER SYSTEM SET output_plugin_libraries = '$allowList'; SELECT pg_reload_conf();"
+    $set = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-c', $setSql))
+    if ($set.ExitCode -ne 0) {
+        throw "Could not configure output_plugin_libraries: $($set.Stderr.Trim())"
+    }
+
+    $verifySql = "SELECT setting FROM pg_settings WHERE name = 'output_plugin_libraries';"
+    $verify = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-t', '-A', '-c', $verifySql))
+    if ($verify.ExitCode -ne 0) {
+        throw "Could not verify output_plugin_libraries after reload: $($verify.Stderr.Trim())"
+    }
+    $plugins = @($verify.Stdout -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($plugins -notcontains 'pglogical_output') {
+        throw "output_plugin_libraries was reloaded but does not contain pglogical_output (actual: $($verify.Stdout.Trim()))"
+    }
+    Write-Host "   output_plugin_libraries configured: $($verify.Stdout.Trim())"
+    return $true
+}
+
 function Invoke-GhApi {
     <#
     .SYNOPSIS
@@ -1018,6 +1076,25 @@ function Invoke-GhApi {
     $gh = (Get-Command gh -ErrorAction Stop).Source
     $result = Invoke-NativeProcess -FilePath $gh -Arguments (@('api') + $Args)
     return @{ ExitCode = $result.ExitCode; Stdout = $result.Stdout.TrimEnd(); Stderr = $result.Stderr.Trim() }
+}
+
+function Get-ReleaseFailureMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$UpstreamTag
+    )
+    return "<!-- pglogical-build-failure: $Version/$UpstreamTag -->"
+}
+
+function Find-ExistingReleaseFailureIssue {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Issues,
+        [Parameter(Mandatory = $true)][string]$Marker
+    )
+    foreach ($issue in @($Issues)) {
+        if ([string]$issue.body -like "*$Marker*") { return $issue }
+    }
+    return $null
 }
 
 function Test-ExistingRelease {

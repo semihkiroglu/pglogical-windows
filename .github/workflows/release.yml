@@ -604,6 +604,7 @@ jobs:
     if: ${{ failure() && !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       issues: write
     steps:
       - name: Checkout
@@ -615,10 +616,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          . ./scripts/common.ps1
           $version = '${{ needs.resolve.outputs.version }}'
           $tag = '${{ needs.resolve.outputs.upstreamTag }}'
+          $failureMarker = Get-ReleaseFailureMarker -Version $version -UpstreamTag $tag
+          $runMarker = "<!-- pglogical-build-failure-run: $env:GITHUB_RUN_ID -->"
           $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+
+          # A rerun keeps the same GITHUB_RUN_ID. Search all existing issues
+          # before creating one so a transient create response or a rerun
+          # cannot produce duplicate failure issues.
+          $rawIssues = @(gh api "repos/$env:GITHUB_REPOSITORY/issues?state=all&per_page=100" --paginate --jq '.[] | {number,state,body}')
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list existing GitHub issues for failure deduplication.' }
+          $issues = @($rawIssues | ForEach-Object {
+            if ($_ -is [string] -and $_.Trim()) { $_ | ConvertFrom-Json }
+          })
+          $existing = Find-ExistingReleaseFailureIssue -Issues $issues -Marker $runMarker
+          if ($existing) {
+            Write-Host "Failure issue already exists for this workflow run: #$($existing.number)"
+            exit 0
+          }
+
           $body = @(
+            $failureMarker
+            $runMarker
             "Build for pglogical $version ($tag) failed."
             ""
             "Workflow run: $runUrl"
@@ -626,3 +647,42 @@ jobs:
           gh issue create --repo "$GITHUB_REPOSITORY" `
             --title "Build failed for pglogical $version ($tag)" `
             --body "$body"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the GitHub issue for the failed build.' }
+
+  close-failure-issues:
+    name: Reconcile resolved build issues
+    needs: [resolve, build, publish]
+    if: ${{ !inputs.dryRun && needs.resolve.outputs.planEntriesJson != '[]' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Close resolved automated failure issues
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          . ./scripts/common.ps1
+          $version = '${{ needs.resolve.outputs.version }}'
+          $tag = '${{ needs.resolve.outputs.upstreamTag }}'
+          $failureMarker = Get-ReleaseFailureMarker -Version $version -UpstreamTag $tag
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+
+          $rawIssues = @(gh api "repos/$env:GITHUB_REPOSITORY/issues?state=open&per_page=100" --paginate --jq '.[] | {number,body}')
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list open GitHub issues for successful-build reconciliation.' }
+          $issues = @($rawIssues | ForEach-Object {
+            if ($_ -is [string] -and $_.Trim()) { $_ | ConvertFrom-Json }
+          })
+          $matches = @($issues | Where-Object { [string]$_.body -like "*$failureMarker*" })
+          foreach ($issue in $matches) {
+            $number = [string]$issue.number
+            gh issue comment $number --repo "$env:GITHUB_REPOSITORY" --body "Resolved by successful release workflow: $runUrl"
+            if ($LASTEXITCODE -ne 0) { throw "Could not comment on automated failure issue #$number." }
+            gh api -X PATCH "repos/$env:GITHUB_REPOSITORY/issues/$number" -f state=closed -f state_reason=completed
+            if ($LASTEXITCODE -ne 0) { throw "Could not close automated failure issue #$number." }
+            Write-Host "Closed resolved automated failure issue #$number"
+          }

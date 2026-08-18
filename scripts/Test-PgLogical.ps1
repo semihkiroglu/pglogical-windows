@@ -11,8 +11,9 @@
       1. verifies the PostgreSQL version of PG_ROOT;
       2. copies the staged package into the isolated installation;
       3. initdb into a temporary data directory;
-      4. configures wal_level=logical, worker/sender/slot counts, and
-         shared_preload_libraries='pglogical';
+      4. configures wal_level=logical, worker/sender/slot counts,
+         shared_preload_libraries='pglogical', and (when supported)
+         output_plugin_libraries including pglogical_output;
       5. starts PostgreSQL with pg_ctl;
       6. CREATE EXTENSION pglogical and verifies extversion;
       7. creates and drops a temporary logical replication slot using
@@ -470,6 +471,11 @@ try {
         # -------------------------------------------------------------------
         Write-Host '== Step 6: CREATE EXTENSION pglogical'
         $psql = Join-Path $binDir 'psql.exe'
+        # PostgreSQL's August 2026 security releases restrict logical decoding
+        # plugins to output_plugin_libraries. Probe the GUC so older minors
+        # remain compatible, then configure and verify the trusted plugin.
+        $null = Configure-PglogicalOutputPlugin -PsqlPath $psql -PgHost '127.0.0.1' -Port $port
+
         $sql = "CREATE EXTENSION pglogical;"
         $out = & $psql -X -h 127.0.0.1 -p $port -U postgres -d postgres -v ON_ERROR_STOP=1 -c $sql 2>&1
         if ($LASTEXITCODE -ne 0) { Fail-Step "CREATE EXTENSION failed: $out"; throw 'create extension failed' }
