@@ -1041,10 +1041,17 @@ function Configure-PglogicalOutputPlugin {
     }
     $currentPlugins = @($current.Stdout -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $allowList = @($currentPlugins + 'pglogical_output' | Select-Object -Unique) -join ', '
-    $setSql = "ALTER SYSTEM SET output_plugin_libraries = '$allowList'; SELECT pg_reload_conf();"
+    # ALTER SYSTEM cannot share a SQL batch with pg_reload_conf(); PostgreSQL
+    # rejects it as running inside a transaction block. Keep the statements in
+    # separate psql invocations.
+    $setSql = "ALTER SYSTEM SET output_plugin_libraries = '$allowList'"
     $set = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-c', $setSql))
     if ($set.ExitCode -ne 0) {
         throw "Could not configure output_plugin_libraries: $($set.Stderr.Trim())"
+    }
+    $reload = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-t', '-A', '-c', 'SELECT pg_reload_conf();'))
+    if ($reload.ExitCode -ne 0 -or $reload.Stdout.Trim() -ne 't') {
+        throw "Could not reload output_plugin_libraries: $($reload.Stderr.Trim())"
     }
 
     $verifySql = "SELECT setting FROM pg_settings WHERE name = 'output_plugin_libraries';"

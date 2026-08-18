@@ -38,6 +38,9 @@ function Invoke-FakeOutputPluginNativeProcess {
         }
         return @{ ExitCode = 0; Stdout = 't'; Stderr = '' }
     }
+    if ($sql -like '*SELECT pg_reload_conf*') {
+        return @{ ExitCode = 0; Stdout = 't'; Stderr = '' }
+    }
     throw "Unexpected SQL in fake psql: $sql"
 }
 
@@ -52,7 +55,7 @@ Test-Case 'supported PostgreSQL config appends pglogical_output without dropping
     $configured = Configure-PglogicalOutputPlugin -PsqlPath 'psql.exe' -PgHost '127.0.0.1' -Port '5432'
 
     Assert-True $configured
-    Assert-Equal 4 @($script:NativeCalls).Count
+    Assert-Equal 5 @($script:NativeCalls).Count
     $alterSql = $script:NativeCalls[2][([array]::IndexOf($script:NativeCalls[2], '-c') + 1)]
     Assert-True ($alterSql -match "ALTER SYSTEM SET output_plugin_libraries = 'pgoutput, test_decoding, wal2json, pglogical_output'")
 }
