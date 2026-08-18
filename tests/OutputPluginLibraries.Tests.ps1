@@ -9,10 +9,21 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'test-helpers.ps1')
 . (Join-Path $PSScriptRoot '..\scripts\common.ps1')
 
+Test-Case 'output plugin GUC support follows the patched PostgreSQL minor thresholds' {
+    Assert-False (Test-PgLogicalOutputPluginGucSupported -PgMajor 14 -PgMinor 23)
+    Assert-True (Test-PgLogicalOutputPluginGucSupported -PgMajor 14 -PgMinor 24)
+    Assert-False (Test-PgLogicalOutputPluginGucSupported -PgMajor 15 -PgMinor 18)
+    Assert-True (Test-PgLogicalOutputPluginGucSupported -PgMajor 15 -PgMinor 19)
+    Assert-False (Test-PgLogicalOutputPluginGucSupported -PgMajor 16 -PgMinor 14)
+    Assert-True (Test-PgLogicalOutputPluginGucSupported -PgMajor 16 -PgMinor 15)
+    Assert-False (Test-PgLogicalOutputPluginGucSupported -PgMajor 17 -PgMinor 10)
+    Assert-True (Test-PgLogicalOutputPluginGucSupported -PgMajor 17 -PgMinor 11)
+    Assert-False (Test-PgLogicalOutputPluginGucSupported -PgMajor 18 -PgMinor 5)
+    Assert-True (Test-PgLogicalOutputPluginGucSupported -PgMajor 18 -PgMinor 6)
+}
+
 $script:NativeCalls = @()
-$script:OutputPluginGucSupported = $true
-$script:OutputPluginSetting = 'pgoutput, test_decoding, wal2json'
-$script:OutputPluginSettingAfterAlter = "`"pgoutput, test_decoding, wal2json,`r`n pglogical_output`""
+$script:OutputPluginSetting = "`"pgoutput, test_decoding, wal2json,`r`n pglogical_output`""
 
 function Invoke-FakeOutputPluginNativeProcess {
     param(
@@ -26,59 +37,37 @@ function Invoke-FakeOutputPluginNativeProcess {
     if ($sql -like '*SELECT setting FROM pg_settings*') {
         return @{ ExitCode = 0; Stdout = $script:OutputPluginSetting; Stderr = '' }
     }
-    if ($sql -like '*FROM pg_settings*') {
-        if ($script:OutputPluginGucSupported) {
-            return @{ ExitCode = 0; Stdout = '1'; Stderr = '' }
-        }
-        return @{ ExitCode = 0; Stdout = '0'; Stderr = '' }
-    }
-    if ($sql -like '*ALTER SYSTEM SET output_plugin_libraries*') {
-        if ($null -ne $script:OutputPluginSettingAfterAlter) {
-            $script:OutputPluginSetting = $script:OutputPluginSettingAfterAlter
-        }
-        return @{ ExitCode = 0; Stdout = 't'; Stderr = '' }
-    }
-    if ($sql -like '*SELECT pg_reload_conf*') {
-        return @{ ExitCode = 0; Stdout = 't'; Stderr = '' }
-    }
     throw "Unexpected SQL in fake psql: $sql"
 }
 
 $script:NativeProcessRunner = 'Invoke-FakeOutputPluginNativeProcess'
 
-Test-Case 'supported PostgreSQL config appends pglogical_output without dropping existing plugins' {
+Test-Case 'supported PostgreSQL verification accepts wrapped output and preserves existing plugins' {
     $script:NativeCalls = @()
-    $script:OutputPluginGucSupported = $true
-    $script:OutputPluginSetting = 'pgoutput, test_decoding, wal2json'
-    $script:OutputPluginSettingAfterAlter = "`"pgoutput, test_decoding, wal2json,`r`n pglogical_output`""
+    $script:OutputPluginSetting = "`"pgoutput, test_decoding, wal2json,`r`n pglogical_output`""
 
-    $configured = Configure-PglogicalOutputPlugin -PsqlPath 'psql.exe' -PgHost '127.0.0.1' -Port '5432'
+    $verified = Test-PgLogicalOutputPluginConfigured -PsqlPath 'psql.exe' -PgHost '127.0.0.1' -Port '5432'
 
-    Assert-True $configured
-    Assert-Equal 5 @($script:NativeCalls).Count
-    $alterSql = $script:NativeCalls[2][([array]::IndexOf($script:NativeCalls[2], '-c') + 1)]
-    Assert-True ($alterSql -match "ALTER SYSTEM SET output_plugin_libraries = 'pgoutput, test_decoding, wal2json, pglogical_output'")
-}
-
-Test-Case 'pre-whitelist PostgreSQL skips the unknown GUC without failing' {
-    $script:NativeCalls = @()
-    $script:OutputPluginGucSupported = $false
-    $script:OutputPluginSettingAfterAlter = $null
-
-    $configured = Configure-PglogicalOutputPlugin -PsqlPath 'psql.exe' -PgHost '127.0.0.1' -Port '5432'
-
-    Assert-False $configured
+    Assert-True $verified
     Assert-Equal 1 @($script:NativeCalls).Count
 }
 
-Test-Case 'supported PostgreSQL fails closed when reload does not expose pglogical_output' {
+Test-Case 'pre-whitelist PostgreSQL skips verification without failing' {
     $script:NativeCalls = @()
-    $script:OutputPluginGucSupported = $true
+    $script:OutputPluginSetting = ''
+
+    $verified = Test-PgLogicalOutputPluginConfigured -PsqlPath 'psql.exe' -PgHost '127.0.0.1' -Port '5432'
+
+    Assert-False $verified
+    Assert-Equal 1 @($script:NativeCalls).Count
+}
+
+Test-Case 'supported PostgreSQL fails closed when the start-time config omits pglogical_output' {
+    $script:NativeCalls = @()
     $script:OutputPluginSetting = 'pgoutput, test_decoding'
-    $script:OutputPluginSettingAfterAlter = $null
 
     Assert-Throws {
-        Configure-PglogicalOutputPlugin -PsqlPath 'psql.exe' -PgHost '127.0.0.1' -Port '5432'
+        Test-PgLogicalOutputPluginConfigured -PsqlPath 'psql.exe' -PgHost '127.0.0.1' -Port '5432'
     } -MessagePattern 'pglogical_output'
 }
 

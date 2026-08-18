@@ -1002,17 +1002,42 @@ function Invoke-NativeProcess {
     return @{ ExitCode = $exitCode; Stdout = $stdout; Stderr = $stderr }
 }
 
-function Configure-PglogicalOutputPlugin {
+function Test-PgLogicalOutputPluginGucSupported {
     <#
     .SYNOPSIS
-        Allows pglogical_output on PostgreSQL versions that implement the
-        output_plugin_libraries security GUC.
+        Identifies PostgreSQL minors that include output_plugin_libraries.
 
     .DESCRIPTION
-        PostgreSQL's August 2026 security releases added an output-plugin
-        whitelist. Older minors do not know this GUC, so probe pg_settings
-        first instead of putting an unknown setting into postgresql.conf.
-        The built-in plugins remain in the allow-list deliberately.
+        PostgreSQL's August 2026 security releases added this GUC to the
+        supported branches. It must be present before the postmaster starts;
+        changing it from an existing session is not sufficient for the slot
+        creation path.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][int]$PgMajor,
+        [Parameter(Mandatory = $true)][int]$PgMinor
+    )
+
+    $minimumMinor = @{
+        14 = 24
+        15 = 19
+        16 = 15
+        17 = 11
+        18 = 6
+    }
+    return $minimumMinor.ContainsKey($PgMajor) -and $PgMinor -ge [int]$minimumMinor[$PgMajor]
+}
+
+function Test-PgLogicalOutputPluginConfigured {
+    <#
+    .SYNOPSIS
+        Verifies that pglogical_output is in the server allow-list.
+
+    .DESCRIPTION
+        The caller writes output_plugin_libraries to postgresql.conf before
+        starting PostgreSQL. This query only verifies the effective setting;
+        it deliberately does not use ALTER SYSTEM because an existing backend
+        can still reject a logical slot after a session-level reload.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$PsqlPath,
@@ -1023,47 +1048,21 @@ function Configure-PglogicalOutputPlugin {
     )
 
     $baseArgs = @('-X', '-h', $PgHost, '-p', $Port, '-U', $User, '-d', $Database, '-v', 'ON_ERROR_STOP=1')
-    $probeSql = "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_settings WHERE name = 'output_plugin_libraries') THEN '1' ELSE '0' END;"
-    $probe = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-t', '-A', '-c', $probeSql))
-    if ($probe.ExitCode -ne 0) {
-        throw "Could not probe output_plugin_libraries support: $($probe.Stderr.Trim())"
-    }
-    $supported = (($probe.Stdout -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1).Trim() -eq '1')
-    if (-not $supported) {
-        Write-Host '   output_plugin_libraries is not available on this PostgreSQL minor; no whitelist change needed'
-        return $false
-    }
-
-    $currentSql = "SELECT setting FROM pg_settings WHERE name = 'output_plugin_libraries';"
-    $current = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-t', '-A', '-c', $currentSql))
-    if ($current.ExitCode -ne 0) {
-        throw "Could not read output_plugin_libraries before configuration: $($current.Stderr.Trim())"
-    }
-    $currentPlugins = @($current.Stdout -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    $allowList = @($currentPlugins + 'pglogical_output' | Select-Object -Unique) -join ', '
-    # ALTER SYSTEM cannot share a SQL batch with pg_reload_conf(); PostgreSQL
-    # rejects it as running inside a transaction block. Keep the statements in
-    # separate psql invocations.
-    $setSql = "ALTER SYSTEM SET output_plugin_libraries = '$allowList'"
-    $set = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-c', $setSql))
-    if ($set.ExitCode -ne 0) {
-        throw "Could not configure output_plugin_libraries: $($set.Stderr.Trim())"
-    }
-    $reload = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-t', '-A', '-c', 'SELECT pg_reload_conf();'))
-    if ($reload.ExitCode -ne 0 -or $reload.Stdout.Trim() -ne 't') {
-        throw "Could not reload output_plugin_libraries: $($reload.Stderr.Trim())"
-    }
-
     $verifySql = "SELECT setting FROM pg_settings WHERE name = 'output_plugin_libraries';"
     $verify = Invoke-NativeProcess -FilePath $PsqlPath -Arguments ($baseArgs + @('-t', '-A', '-c', $verifySql))
     if ($verify.ExitCode -ne 0) {
-        throw "Could not verify output_plugin_libraries after reload: $($verify.Stderr.Trim())"
+        throw "Could not verify output_plugin_libraries: $($verify.Stderr.Trim())"
     }
+
     $normalizedSetting = [string]$verify.Stdout
     $normalizedSetting = $normalizedSetting.Replace("`r", '').Replace("`n", '').Replace('"', '')
+    if ([string]::IsNullOrWhiteSpace($normalizedSetting)) {
+        Write-Host '   output_plugin_libraries is not available on this PostgreSQL minor; no whitelist verification needed'
+        return $false
+    }
     $plugins = @($normalizedSetting -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     if ($plugins -notcontains 'pglogical_output') {
-        throw "output_plugin_libraries was reloaded but does not contain pglogical_output (actual: $normalizedSetting)"
+        throw "output_plugin_libraries does not contain pglogical_output (actual: $normalizedSetting)"
     }
     Write-Host "   output_plugin_libraries configured: $normalizedSetting"
     return $true
