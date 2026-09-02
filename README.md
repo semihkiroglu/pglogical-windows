@@ -66,10 +66,6 @@ The pipeline runs on GitHub Actions:
    setting should omit the line. The setting is required because PostgreSQL
    now rejects unlisted logical decoding output plugins (CVE-2026-6471).
 
-   **Türkçe:** PostgreSQL 14.24/15.19/16.15/17.11/18.6 ve sonraki sürümlerde
-   provider üzerinde `pglogical_output` whitelist'e eklenmelidir. Mevcut özel
-   liste varsa üzerine yazmayın; plugin'i mevcut güvenilir listeye ekleyin.
-
 5. Restart PostgreSQL.
 6. Run `CREATE EXTENSION pglogical;` on each database that needs it.
 
