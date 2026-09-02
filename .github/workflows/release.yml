@@ -420,7 +420,7 @@ jobs:
             -UpstreamTag $env:UPSTREAM_TAG `
             -CommitSha $env:COMMIT_SHA `
             -RunUrl $env:RUN_URL)
-          if ($LASTEXITCODE -ne 0) { throw 'Prepare-UnifiedReleaseAssets failed.' }
+          if (-not $summaryOutput) { throw 'Prepare-UnifiedReleaseAssets produced no summary.' }
           $summary = ($summaryOutput -join "`n") | ConvertFrom-Json
           "releaseTag=$($summary.releaseTag)" >> $env:GITHUB_OUTPUT
           "releaseTitle=$($summary.releaseTitle)" >> $env:GITHUB_OUTPUT

@@ -33,6 +33,8 @@ Test-Case 'Release workflow publishes one complete unified release' {
     Assert-True ($prepare -match 'Get-ReleaseTitle')
     Assert-True ($release -match '--draft')
     Assert-True ($release -match 'gh release edit.*--draft=false')
+    Assert-True ($release -match 'if \(-not \$summaryOutput\)')
+    Assert-False ($release -match "if \(\$LASTEXITCODE -ne 0\) \{ throw 'Prepare-UnifiedReleaseAssets failed.' \}")
     Assert-True ($releaseBody -match '\{\{PACKAGE_PROVENANCE\}\}')
     Assert-True ($releaseBody -match '\{\{PACKAGES\}\}')
     Assert-True ($releaseBody -match '\{\{CHECKSUMS\}\}')
