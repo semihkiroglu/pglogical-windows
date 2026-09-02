@@ -11,6 +11,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$OutputFile,
+    [string]$CoverageFile,
     [switch]$Force
 )
 
@@ -18,6 +19,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 try {
+    if (-not $CoverageFile) { $CoverageFile = Join-Path $PSScriptRoot '..\.github\compatibility-coverage.json' }
+    $coverageEntries = @(Read-CompatibilityCoverage -Path $CoverageFile)
     $config = Import-VersionConfig
     $version = [string]$config.releaseBaseline
     $pgOrgEntries = @(Get-PgOrgVersions)
@@ -33,7 +36,7 @@ try {
     }
 
     $localReleases = @(Invoke-GitHubApi -Url "https://api.github.com/repos/$Repository/releases")
-    $entries = @(Get-CompatibilitySmokePlan -Majors $configuredMajors -LocalReleases $localReleases -ServerArtifacts $artifacts -Force:$Force)
+    $entries = @(Get-CompatibilitySmokePlan -Majors $configuredMajors -LocalReleases $localReleases -ServerArtifacts $artifacts -CoverageEntries $coverageEntries -Force:$Force)
     $testEntries = @($entries | Where-Object { $_.status -eq 'test' })
     $upstreamTag = ConvertFrom-PgLogicalVersion -Version $version
     $upstreamCommit = @(Invoke-GitHubApi -Url "https://api.github.com/repos/$(Get-UpstreamRepository)/commits/$upstreamTag") | Select-Object -First 1

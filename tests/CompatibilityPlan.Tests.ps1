@@ -117,6 +117,52 @@ Test-Case 'Smoke plan marks drift as test, matching artifact as covered, and mis
     Assert-Equal '2.4.8-pg14-w1' (@($plan | Where-Object postgresqlMajor -eq '14')[0].localReleaseTag)
 }
 
+Test-Case 'Smoke plan treats a previously passed package/server pair as covered' {
+    $releases = @(
+        (New-Release -Tag '2.4.8-pg18-w1' -ArtifactFilename 'postgresql-18.5-1-windows-x64-binaries.zip')
+    )
+    $coverage = @([pscustomobject]@{
+        postgresqlMajor = '18'
+        localReleaseTag = '2.4.8-pg18-w1'
+        localPackageAssetName = 'package-2.4.8-pg18-w1.zip'
+        localPackageBuildArtifactFilename = 'postgresql-18.5-1-windows-x64-binaries.zip'
+        serverEdbArtifactFilename = 'postgresql-18.6-2-windows-x64-binaries.zip'
+        serverEdbArtifactUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.6-2-windows-x64-binaries.zip'
+        status = 'passed'
+    })
+    $plan = @(Get-CompatibilitySmokePlan -Majors @('18') -LocalReleases $releases -ServerArtifacts $serverArtifacts -CoverageEntries $coverage)
+    Assert-Equal 'covered' $plan[0].status
+    Assert-Equal 'compatibility-smoke' $plan[0].coverageSource
+
+    $nextServerArtifacts = [ordered]@{ '18' = New-Artifact -Major '18' -Minor '7' -Revision 1 }
+    $nextPlan = @(Get-CompatibilitySmokePlan -Majors @('18') -LocalReleases $releases -ServerArtifacts $nextServerArtifacts -CoverageEntries $coverage)
+    Assert-Equal 'test' $nextPlan[0].status
+}
+
+Test-Case 'Compatibility coverage loader accepts a valid persisted entry' {
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("compatibility-coverage-" + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        [ordered]@{
+            schemaVersion = 1
+            entries = @([ordered]@{
+                postgresqlMajor = '18'
+                localReleaseTag = '2.4.8-pg18-w1'
+                localPackageAssetName = 'package-2.4.8-pg18-w1.zip'
+                localPackageBuildArtifactFilename = 'postgresql-18.5-1-windows-x64-binaries.zip'
+                serverEdbArtifactFilename = 'postgresql-18.6-2-windows-x64-binaries.zip'
+                serverEdbArtifactUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.6-2-windows-x64-binaries.zip'
+                status = 'passed'
+            })
+        } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding utf8
+        $entries = @(Read-CompatibilityCoverage -Path $path)
+        Assert-Equal 1 $entries.Count
+        Assert-Equal '2.4.8-pg18-w1' $entries[0].localReleaseTag
+    }
+    finally {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    }
+}
+
 Test-Case 'Force makes a covered package eligible for smoke testing' {
     $releases = @(
         (New-Release -Tag '2.4.8-pg15-w1' -ArtifactFilename 'postgresql-15.19-2-windows-x64-binaries.zip')
@@ -175,6 +221,12 @@ Test-Case 'Environment and download failures never create a targeted rebuild' {
 
 Test-Case 'Compatibility failure marker is deterministic' {
     Assert-Equal '<!-- pglogical-compatibility-failure: pg18/2.4.8-pg18-w1/postgresql-18.6-2-windows-x64-binaries.zip -->' (Get-CompatibilityFailureMarker -Major '18' -PackageTag '2.4.8-pg18-w1' -ServerArtifactFilename 'postgresql-18.6-2-windows-x64-binaries.zip')
+}
+
+Test-Case 'In-flight rebuild detection uses the current local release tag format' {
+    $rebuildScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\Get-CompatibilityRebuildPlan.ps1') -Raw
+    Assert-True ($rebuildScript.Contains('[0-9]+\.[0-9]+\.[0-9]+-pg[0-9]+-w[0-9]+'))
+    Assert-False ($rebuildScript.Contains('-windows\.[0-9]+'))
 }
 
 Complete-Tests

@@ -649,7 +649,7 @@ jobs:
             ""
             "Workflow run: $runUrl"
           ) -join "`n"
-          gh issue create --repo "$GITHUB_REPOSITORY" `
+          gh issue create --repo "$env:GITHUB_REPOSITORY" `
             --title "Build failed for pglogical $version ($tag)" `
             --body "$body"
           if ($LASTEXITCODE -ne 0) { throw 'Could not create the GitHub issue for the failed build.' }
