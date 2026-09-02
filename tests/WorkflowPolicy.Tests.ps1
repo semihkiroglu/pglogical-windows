@@ -45,4 +45,15 @@ Test-Case 'Release failure reporter uses PowerShell environment variable syntax'
     Assert-False ($release.Contains('gh issue create --repo "$GITHUB_REPOSITORY"'))
 }
 
+Test-Case 'Compatibility workflow persists successful coverage through an automated PR' {
+    Assert-True ($compat -match 'Update-CompatibilityCoverage\.ps1')
+    Assert-True ($compat -match 'compatibility-coverage\.json')
+    Assert-True ($compat -match 'contents: write')
+    Assert-True ($compat -match 'pull-requests: write')
+    Assert-True ($compat -match 'gh pr create')
+    Assert-True ($compat -match 'gh pr merge .*--auto')
+    Assert-True ($compat -match 'group: compatibility-smoke')
+    Assert-True ($compat -match 'git push --force-with-lease')
+}
+
 Complete-Tests

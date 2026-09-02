@@ -363,6 +363,81 @@ function Get-CompatibilityFailureMarker {
     return "<!-- pglogical-compatibility-failure: pg$Major/$PackageTag/$ServerArtifactFilename -->"
 }
 
+function Read-CompatibilityCoverage {
+    <#
+    .SYNOPSIS
+        Reads and validates the persisted compatibility-smoke coverage state.
+
+    .DESCRIPTION
+        Each entry records one exact published package and one exact EDB server
+        artifact that passed compatibility smoke. Missing state is treated as
+        empty state; malformed state fails closed.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    try {
+        $state = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Compatibility coverage file '$Path' is missing or malformed: $($_.Exception.Message)"
+    }
+    if ($null -eq $state -or $null -eq $state.PSObject.Properties['schemaVersion'] -or [int]$state.schemaVersion -ne 1) {
+        throw "Compatibility coverage file '$Path' has an unsupported schemaVersion; failing closed."
+    }
+    if ($null -eq $state.PSObject.Properties['entries']) {
+        throw "Compatibility coverage file '$Path' has no entries array; failing closed."
+    }
+
+    $entries = @($state.entries)
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($entry in $entries) {
+        foreach ($property in @('postgresqlMajor', 'localReleaseTag', 'localPackageAssetName', 'localPackageBuildArtifactFilename', 'serverEdbArtifactFilename', 'serverEdbArtifactUrl', 'status')) {
+            if ($null -eq $entry -or $null -eq $entry.PSObject.Properties[$property] -or [string]::IsNullOrWhiteSpace([string]$entry.$property)) {
+                throw "Compatibility coverage entry is missing '$property'; failing closed."
+            }
+        }
+        if ([string]$entry.status -ne 'passed') { throw "Compatibility coverage entry has unsupported status '$($entry.status)'; failing closed." }
+        $major = [string]$entry.postgresqlMajor
+        if ($major -notmatch '^\d+$') { throw "Compatibility coverage entry has an invalid PostgreSQL major '$major'; failing closed." }
+        $tagIdentity = ConvertFrom-LocalReleaseTag -Tag ([string]$entry.localReleaseTag)
+        if (-not $tagIdentity -or $tagIdentity.postgresqlMajor -ne $major) {
+            throw "Compatibility coverage entry has an invalid release identity for PostgreSQL $major; failing closed."
+        }
+        $packageArtifact = ConvertFrom-EdbArtifactFilename -Filename ([string]$entry.localPackageBuildArtifactFilename)
+        if (-not $packageArtifact -or $packageArtifact.major -ne $major) {
+            throw "Compatibility coverage entry has an invalid package artifact for PostgreSQL $major; failing closed."
+        }
+        $serverArtifact = ConvertFrom-EdbArtifactFilename -Filename ([string]$entry.serverEdbArtifactFilename)
+        if (-not $serverArtifact -or $serverArtifact.major -ne $major) {
+            throw "Compatibility coverage entry has an invalid server artifact for PostgreSQL $major; failing closed."
+        }
+        Assert-EdbCandidateUrl -Url ([string]$entry.serverEdbArtifactUrl) -Major $major -Minor $serverArtifact.minor -Revision ([int]$serverArtifact.revision) | Out-Null
+        $key = "$major|$($tagIdentity.tag_name)|$([string]$entry.localPackageAssetName)|$([string]$entry.localPackageBuildArtifactFilename)|$([string]$entry.serverEdbArtifactFilename)|$([string]$entry.serverEdbArtifactUrl)"
+        if (-not $seen.Add($key)) { throw "Compatibility coverage contains a duplicate entry for '$key'; failing closed." }
+    }
+    return @($entries)
+}
+
+function Test-CompatibilityCoverageMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)][string]$LocalReleaseTag,
+        [Parameter(Mandatory = $true)][string]$LocalPackageAssetName,
+        [Parameter(Mandatory = $true)][string]$LocalPackageBuildArtifactFilename,
+        [Parameter(Mandatory = $true)][string]$ServerArtifactFilename,
+        [Parameter(Mandatory = $true)][string]$ServerArtifactUrl
+    )
+    if ($null -eq $Entry) { return $false }
+    return (
+        [string]$Entry.localReleaseTag -eq $LocalReleaseTag -and
+        [string]$Entry.localPackageAssetName -eq $LocalPackageAssetName -and
+        [string]$Entry.localPackageBuildArtifactFilename -eq $LocalPackageBuildArtifactFilename -and
+        [string]$Entry.serverEdbArtifactFilename -eq $ServerArtifactFilename -and
+        [string]$Entry.serverEdbArtifactUrl -eq $ServerArtifactUrl
+    )
+}
+
 function Get-CompatibilitySmokePlan {
     <#
     .SYNOPSIS
@@ -374,6 +449,7 @@ function Get-CompatibilitySmokePlan {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Majors,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$LocalReleases,
         [Parameter(Mandatory = $true)][System.Collections.IDictionary]$ServerArtifacts,
+        [AllowEmptyCollection()][object[]]$CoverageEntries = @(),
         [switch]$Force
     )
     $plan = [System.Collections.Generic.List[object]]::new()
@@ -410,10 +486,21 @@ function Get-CompatibilitySmokePlan {
         if (-not $localFilename) { $metadataIssue = "Release $($release.tag_name) records no EDB binaries archive filename." }
         elseif (-not (ConvertFrom-EdbArtifactFilename -Filename $localFilename)) { $metadataIssue = "Release $($release.tag_name) records an invalid EDB artifact filename '$localFilename'." }
         if (-not $packageAssetName) { $metadataIssue = "Release $($release.tag_name) does not expose exactly one package ZIP asset." }
-        $status = if (-not $Force -and -not $metadataIssue -and $localFilename -eq [string]$artifact.filename) { 'covered' } else { 'test' }
+        $coverageMatch = @($CoverageEntries | Where-Object {
+            Test-CompatibilityCoverageMatch -Entry $_ `
+                -LocalReleaseTag ([string]$release.tag_name) `
+                -LocalPackageAssetName ([string]$packageAssetName) `
+                -LocalPackageBuildArtifactFilename ([string]$localFilename) `
+                -ServerArtifactFilename ([string]$artifact.filename) `
+                -ServerArtifactUrl ([string]$artifact.url)
+        }).Count -gt 0
+        $sameBuildArtifact = -not $metadataIssue -and $localFilename -eq [string]$artifact.filename
+        $status = if (-not $Force -and -not $metadataIssue -and ($sameBuildArtifact -or $coverageMatch)) { 'covered' } else { 'test' }
+        $coverageSource = if ($sameBuildArtifact) { 'package-build' } elseif ($coverageMatch) { 'compatibility-smoke' } else { '' }
         $plan.Add([pscustomobject]@{
             status = $status
             failureClass = if ($metadataIssue) { 'metadata' } else { 'compatibility' }
+            coverageSource = $coverageSource
             metadataIssue = [string]$metadataIssue
             postgresqlMajor = $major
             serverMinor = [string]$artifact.minor
