@@ -99,7 +99,7 @@ Ubuntu runner (cheap) and:
 5. lists the local releases and, per PG major, compares the resolved EDB
    artifact filename with the one recorded in the latest release for that
    version × major:
-   * no local release → plan `windows.1`;
+   * no local release → plan `w1`;
    * same artifact filename → covered, no action;
    * newer artifact (minor and/or packaging revision) → plan the **next
      packaging revision** for that major only;
@@ -108,7 +108,7 @@ Ubuntu runner (cheap) and:
    entry pinning its exact EDB artifact);
 7. does nothing when the latest release is already fully packaged;
 8. dispatches **one** `release.yml` run with the complete pinned plan
-   (plan-entry matrix; every entry carries its own `windows.N` packaging
+   (plan-entry matrix; every entry carries its own `wN` packaging
    revision and its own pinned EDB artifact — a single global
    packaging-revision input could not represent per-major differences).
 
@@ -134,18 +134,20 @@ published twice concurrently.
 One GitHub release per upstream pglogical release **and** PostgreSQL major:
 
 ```
-pglogical-2.4.8-pg14-windows.1
-pglogical-2.4.8-pg15-windows.1
+Release title: 2.4.8 for PostgreSQL 14 (W1)
+Git tag:       2.4.8-pg14-w1
+Package:       pglogical-2.4.8-pg14-w1-x64.zip
 ```
 
 * `2.4.8` identifies the upstream release.
 * `pg14` identifies the PostgreSQL major the package was built for.
-* `windows.1` is the packaging revision.
-* A new pglogical upstream version always starts at `windows.1`.
+* `w1` is the Windows packaging revision in the Git tag and package filename;
+  the release title renders it as `W1`.
+* A new pglogical upstream version always starts at `w1`.
 * A rebuild of the same pglogical version and PostgreSQL major caused by an
   EDB artifact change (new packaging revision or new filename of the exact
-  official artifact) is released as the next revision (`windows.2`,
-  `windows.3`, …) for the affected major(s) only. The watcher computes the
+  official artifact) is released as the next revision (`w2`, `w3`, …) for the
+  affected major(s) only. The watcher computes the
   next revision as the highest existing revision plus one; an existing tag
   is never overwritten or silently reused.
 * A rebuild caused only by packaging changes (e.g. a fix in the ZIP layout
@@ -176,15 +178,15 @@ pglogical-2.4.8-pg15-windows.1
    exact artifact filename), clones the exact upstream tag, verifies the
    expected upstream commit SHA against the checkout (always, even for
    caller-supplied checkouts), builds with CMake + MSVC, verifies DLL
-   exports with `dumpbin`, runs the smoke test, packages the exact-version
-   ZIP (`pglogical-<v>-pg<major>.<minor>-edb<rev>-windows-x64.zip`) with an
+   exports with `dumpbin`, runs the smoke test, packages the compatibility-major
+   ZIP (`pglogical-<v>-pg<major>-w<rev>-x64.zip`) with an
    embedded `BUILD-INFO.json`, and records the EDB artifact filename and
    its calculated SHA-256.
 3. **publish** (Ubuntu, `contents: write` only here): downloads all
    artifacts, verifies the expected ZIP name/count and every SHA-256
    locally, creates a **draft** release pinned to the validated commit
-   (`--target $GITHUB_SHA`) with a title identifying the compatibility
-   major and the exact build input, uploads all ZIPs and the aggregate
+   (`--target $GITHUB_SHA`) with a title identifying the compatibility major and Windows packaging revision,
+ uploads all ZIPs and the aggregate
    `SHA256SUMS.txt`, and only then publishes the release. The release body
    records distinct provenance fields: pglogical version, upstream repo /
    tag / commit SHA, Windows packaging revision, PostgreSQL compatibility

@@ -23,6 +23,7 @@
 # job, which needs contents: write for the release itself.
 
 name: release
+run-name: release ${{ inputs.rebuildMarker || inputs.upstreamTag || 'manual' }}
 
 on:
   workflow_dispatch:
@@ -38,7 +39,7 @@ on:
         type: string
         default: ''
       packagingRevision:
-        description: 'Packaging revision for discovery mode, e.g. 1 (windows.1). Ignored when planJson is supplied.'
+        description: 'Packaging revision for discovery mode, e.g. 1 (w1). Ignored when planJson is supplied.'
         required: false
         type: number
         default: 1
@@ -52,6 +53,11 @@ on:
         required: false
         type: boolean
         default: false
+      rebuildMarker:
+        description: 'Optional deterministic compatibility-rebuild marker used for dispatch deduplication.'
+        required: false
+        type: string
+        default: ''
   workflow_call:
     inputs:
       planJson:
@@ -403,10 +409,9 @@ jobs:
           $expectedName = (Get-PackageZipName `
             -PglogicalVersion '${{ needs.resolve.outputs.version }}' `
             -PostgresqlMajor '${{ matrix.entry.postgresqlMajor }}' `
-            -PostgresqlMinor '${{ matrix.entry.postgresqlMinor }}' `
-            -EdbPackagingRevision ([int]'${{ matrix.entry.edbPackagingRevision }}'))
+            -PackagingRevision ([int]'${{ matrix.entry.windowsPackagingRevision }}'))
           if ($zips[0].Name -ne $expectedName) {
-            throw "Packaged ZIP name '$($zips[0].Name)' does not match the exact-version name '$expectedName'"
+            throw "Packaged ZIP name '$($zips[0].Name)' does not match the compatibility-major name '$expectedName'"
           }
           $sums = @(Get-ChildItem artifacts -Filter 'SHA256SUMS.txt' -File | ForEach-Object { Get-Content $_.FullName })
           foreach ($zip in $zips) {
@@ -486,7 +491,7 @@ jobs:
           # release on failure.
           gh release create "$releaseTag" --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "pglogical ${{ needs.resolve.outputs.version }} — PostgreSQL ${{ matrix.entry.postgresqlMajor }} (built against ${{ matrix.entry.postgresqlBuildVersion }}, EDB revision ${{ matrix.entry.edbPackagingRevision }}) — windows.${{ matrix.entry.windowsPackagingRevision }}" \
+            --title "${{ needs.resolve.outputs.version }} for PostgreSQL ${{ matrix.entry.postgresqlMajor }} (W${{ matrix.entry.windowsPackagingRevision }})" \
             --notes-file release-body.md \
             artifacts/*.zip artifacts/SHA256SUMS.txt
 

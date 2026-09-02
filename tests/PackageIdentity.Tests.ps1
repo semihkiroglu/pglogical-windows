@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Unit + integration tests for the exact-version package identity:
+    Unit + integration tests for the compatibility-major package identity:
     Get-PackageZipName, New-BuildInfo, and a real Package-PgLogical.ps1 run
     against a synthetic staging directory (ZIP extraction + BUILD-INFO.json
     verification included).
@@ -12,9 +12,11 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'test-helpers.ps1')
 . (Join-Path $PSScriptRoot '..\scripts\common.ps1')
 
-Test-Case 'Get-PackageZipName produces the exact-version name' {
-    $name = Get-PackageZipName -PglogicalVersion '2.4.8' -PostgresqlMajor '18' -PostgresqlMinor '4' -EdbPackagingRevision 2
-    Assert-Equal 'pglogical-2.4.8-pg18.4-edb2-windows-x64.zip' $name
+Test-Case 'Release identity helpers produce the requested title, tag, and package names' {
+    Assert-Equal '2.4.8 for PostgreSQL 18 (W1)' (Get-ReleaseTitle -Version '2.4.8' -PgMajor '18' -PackagingRevision 1)
+    Assert-Equal '2.4.8-pg18-w1' (Get-LocalReleaseTag -Version '2.4.8' -PgMajor '18' -PackagingRevision 1)
+    $name = Get-PackageZipName -PglogicalVersion '2.4.8' -PostgresqlMajor '18' -PackagingRevision 1
+    Assert-Equal 'pglogical-2.4.8-pg18-w1-x64.zip' $name
 }
 
 Test-Case 'New-BuildInfo emits deterministic, complete JSON' {
@@ -77,7 +79,7 @@ try {
     }
     $fakeSha = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
 
-    Test-Case 'Package-PgLogical.ps1 produces an exact-version ZIP with valid BUILD-INFO.json' {
+    Test-Case 'Package-PgLogical.ps1 produces a compatibility-major ZIP with valid BUILD-INFO.json' {
         $outDir = Join-Path $work 'out'
         $zip = & pwsh -NoProfile -File (Join-Path $PSScriptRoot '..\scripts\Package-PgLogical.ps1') `
             -StagingDir $staging `
@@ -87,7 +89,7 @@ try {
             -SkipLicense
         if ($LASTEXITCODE -ne 0) { throw "Package-PgLogical.ps1 failed (exit $LASTEXITCODE)" }
         $zip = ($zip | Select-Object -Last 1)
-        Assert-Equal 'pglogical-2.4.8-pg18.4-edb2-windows-x64.zip' (Split-Path -Leaf $zip)
+        Assert-Equal 'pglogical-2.4.8-pg18-w1-x64.zip' (Split-Path -Leaf $zip)
 
         # Extract and verify.
         $extract = Join-Path $work 'extract'
@@ -106,7 +108,7 @@ try {
         # Checksum line must exist and match the ZIP.
         $sums = Get-Content (Join-Path $outDir 'SHA256SUMS.txt')
         $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-        Assert-True (($sums | Where-Object { $_ -like "*pglogical-2.4.8-pg18.4-edb2-windows-x64.zip" }) -match "^$actual")
+        Assert-True (($sums | Where-Object { $_ -like "*pglogical-2.4.8-pg18-w1-x64.zip" }) -match "^$actual")
     }
 }
 finally {

@@ -30,7 +30,7 @@ function New-ValidEntry {
         edbPackagingRevision     = $EdbRevision
         edbArtifactFilename      = "postgresql-$Major.$Minor-$EdbRevision-windows-x64-binaries.zip"
         edbArtifactUrl           = "https://get.enterprisedb.com/postgresql/postgresql-$Major.$Minor-$EdbRevision-windows-x64-binaries.zip"
-        localTag                 = "pglogical-2.4.8-pg$Major-windows.$WindowsRevision"
+        localTag                 = "2.4.8-pg$Major-w$WindowsRevision"
     }
 }
 

@@ -38,8 +38,8 @@ The pipeline runs on GitHub Actions:
 
 1. Go to [GitHub Releases](https://github.com/semihkiroglu/pglogical-windows/releases)
    and download the ZIP matching your PostgreSQL build line, e.g.
-   `pglogical-2.4.8-pg18.4-edb2-windows-x64.zip`. (The exact PostgreSQL minor
-   and EDB packaging revision in the filename change between releases.)
+   `pglogical-2.4.8-pg18-w1-x64.zip`. The exact PostgreSQL minor and EDB
+   packaging revision used by that package are recorded in `BUILD-INFO.json`.
 2. Verify the SHA-256 checksum against `SHA256SUMS.txt`.
 3. Extract the ZIP into the root of your PostgreSQL installation (for a
    standard EDB installation: `C:\Program Files\PostgreSQL\<major>`) so that
@@ -108,20 +108,22 @@ only as compatible with your PostgreSQL version as the upstream source is.
 
 Each release contains one ZIP per PostgreSQL major. The GitHub release **tag**
 identifies the PostgreSQL compatibility-major release stream
-(`pglogical-<version>-pg<major>-windows.<rev>`), while the asset **filename**
-identifies the exact PostgreSQL build input:
+(`<version>-pg<major>-w<revision>`), and the release title follows
+`<version> for PostgreSQL <major> (W<revision>)`. The asset **filename** uses
+the same release identity:
 
 ```
-pglogical-<pglogical-version>-pg<postgres-major>.<postgres-minor>-edb<edb-revision>-windows-x64.zip
+pglogical-<pglogical-version>-pg<postgres-major>-w<packaging-revision>-x64.zip
 ```
 
-Example: `pglogical-2.4.8-pg18.4-edb2-windows-x64.zip`
+Example: `pglogical-2.4.8-pg18-w1-x64.zip`
 
 | Part | Meaning |
 | --- | --- |
 | `pglogical 2.4.8` | upstream pglogical version |
-| `PostgreSQL 18.4` | exact PostgreSQL version the extension was built against |
-| `EDB packaging revision 2` | revision of the EnterpriseDB binaries archive used |
+| `PostgreSQL 18` | compatibility major the package targets |
+| `W1` | Windows packaging revision |
+| `PostgreSQL 18.4` / `EDB packaging revision 2` | exact build provenance recorded in `BUILD-INFO.json` |
 | `Windows x64` | platform / architecture |
 
 Each ZIP has an installation-oriented layout:

@@ -82,4 +82,16 @@ Test-Case 'High-level GhApiRunner injection takes precedence and never touches t
     $script:GhApiRunner = $null
 }
 
+Test-Case 'GitHub collection wrappers are unwrapped without changing object responses' {
+    $wrapped = [pscustomobject]@{ workflow_runs = @([pscustomobject]@{ id = 1 }, [pscustomobject]@{ id = 2 }) }
+    $items = @(ConvertTo-GitHubApiItems -Response $wrapped)
+    Assert-Equal 2 $items.Count
+    Assert-Equal 2 $items[1].id
+
+    $commit = [pscustomobject]@{ sha = ('a' * 40); commit = [pscustomobject]@{} }
+    $single = @(ConvertTo-GitHubApiItems -Response $commit)
+    Assert-Equal 1 $single.Count
+    Assert-Equal $commit.sha $single[0].sha
+}
+
 Complete-Tests

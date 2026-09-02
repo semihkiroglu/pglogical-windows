@@ -1,0 +1,279 @@
+# Runs compatibility smoke against the exact package already published for
+# each configured PostgreSQL major. This workflow never checks out pglogical
+# source and never performs a source build.
+name: compatibility-smoke
+
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Test covered packages too; never changes the rebuild rule.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+jobs:
+  discover:
+    name: Discover exact artifacts and smoke plan
+    runs-on: ubuntu-24.04
+    outputs:
+      planJson: ${{ steps.plan.outputs.planJson }}
+      testEntriesJson: ${{ steps.plan.outputs.testEntriesJson }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Build compatibility plan
+        id: plan
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          $planFile = Join-Path $env:RUNNER_TEMP 'compatibility-plan.json'
+          $arguments = @('-NoProfile', '-File', './scripts/Get-CompatibilitySmokePlan.ps1', '-Repository', $env:REPOSITORY, '-OutputFile', $planFile)
+          if ($env:FORCE -eq 'true') { $arguments += '-Force' }
+          & pwsh @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $plan = Get-Content -LiteralPath $planFile -Raw | ConvertFrom-Json
+          $planJson = $plan | ConvertTo-Json -Depth 30 -Compress
+          $testEntries = @($plan.testEntries)
+          $testEntriesJson = if ($testEntries.Count -eq 0) { '[]' } else { $testEntries | ConvertTo-Json -Depth 20 -Compress -AsArray }
+          'planJson<<PLAN_JSON' >> $env:GITHUB_OUTPUT
+          $planJson >> $env:GITHUB_OUTPUT
+          'PLAN_JSON' >> $env:GITHUB_OUTPUT
+          "testEntriesJson=$testEntriesJson" >> $env:GITHUB_OUTPUT
+          Write-Host "Compatibility plan: $($testEntries.Count) package(s) require smoke."
+
+  smoke:
+    name: Smoke PostgreSQL ${{ matrix.entry.postgresqlMajor }}
+    needs: discover
+    if: ${{ needs.discover.result == 'success' && needs.discover.outputs.testEntriesJson != '[]' }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJson(needs.discover.outputs.testEntriesJson) }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Cache exact PostgreSQL artifact
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/pg-cache
+          key: compatibility-pg-${{ matrix.entry.serverEdbArtifactFilename }}
+
+      - name: Install package and run compatibility smoke
+        shell: pwsh
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ matrix.entry.localReleaseTag }}
+          PACKAGE_ASSET: ${{ matrix.entry.localPackageAssetName }}
+          PG_MAJOR: ${{ matrix.entry.postgresqlMajor }}
+          PG_MINOR: ${{ matrix.entry.serverMinor }}
+          PG_URL: ${{ matrix.entry.serverEdbArtifactUrl }}
+          PG_VERSION: ${{ matrix.entry.serverBuildVersion }}
+          SERVER_ARTIFACT: ${{ matrix.entry.serverEdbArtifactFilename }}
+          RESULT_PATH: ${{ runner.temp }}/compat-result-pg${{ matrix.entry.postgresqlMajor }}.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $result = [ordered]@{
+            resultType = 'smoke-result'
+            status = 'failed'
+            failureClass = 'environment'
+            postgresqlMajor = [string]$env:PG_MAJOR
+            serverMinor = [string]$env:PG_MINOR
+            serverBuildVersion = [string]$env:PG_VERSION
+            serverEdbArtifactFilename = [string]$env:SERVER_ARTIFACT
+            serverEdbArtifactUrl = [string]$env:PG_URL
+            localReleaseTag = [string]$env:RELEASE_TAG
+            localPackageAssetName = [string]$env:PACKAGE_ASSET
+            localPackageBuildArtifactFilename = ''
+            packageProvenance = $null
+            error = ''
+          }
+          try {
+            if (-not $env:RELEASE_TAG -or -not $env:PACKAGE_ASSET) {
+              $result.failureClass = 'metadata'
+              throw 'Compatibility plan has no published release tag or package asset.'
+            }
+            $pgDestination = Join-Path $env:RUNNER_TEMP ("pg-install-pg" + $env:PG_MAJOR)
+            $pgCache = Join-Path $env:RUNNER_TEMP 'pg-cache'
+            try {
+              $pgOutput = & pwsh -NoProfile -File ./scripts/Install-PostgreSql.ps1 -Major ([int]$env:PG_MAJOR) -Minor $env:PG_MINOR -BinariesUrl $env:PG_URL -DestinationDir $pgDestination -CacheDir $pgCache
+              if ($LASTEXITCODE -ne 0) { throw "PostgreSQL installation exited with code $LASTEXITCODE." }
+              $pgRoot = ([string](@($pgOutput | Select-Object -Last 1))).Trim()
+              if (-not $pgRoot -or -not (Test-Path -LiteralPath $pgRoot -PathType Container)) { throw 'PostgreSQL installer returned no valid PG_ROOT.' }
+            }
+            catch {
+              if ($_.Exception.Message -match '(?i)checksum|BUILD-INFO|provenance|ZIP|asset|release tag|major mismatch|layout') { $result.failureClass = 'metadata' } else { $result.failureClass = 'download' }
+              throw
+            }
+            $packageOutputDir = Join-Path $env:RUNNER_TEMP ("pglogical-package-pg" + $env:PG_MAJOR)
+            try {
+              $packageOutput = & pwsh -NoProfile -File ./scripts/Install-PgLogicalReleasePackage.ps1 -ReleaseTag $env:RELEASE_TAG -PostgresqlMajor $env:PG_MAJOR -Repository $env:REPOSITORY -OutputDir $packageOutputDir -PackageAssetName $env:PACKAGE_ASSET
+              if ($LASTEXITCODE -ne 0) { throw "Release package installer exited with code $LASTEXITCODE." }
+              $packageJson = ([string](@($packageOutput | Select-Object -Last 1))).Trim() | ConvertFrom-Json
+              if ([string]$packageJson.status -ne 'success' -or -not (Test-Path -LiteralPath ([string]$packageJson.stagingDir) -PathType Container)) { throw 'Release package installer returned an invalid result.' }
+              $result.localPackageBuildArtifactFilename = [string]$packageJson.packageProvenance.edbArtifactFilename
+              $result.packageProvenance = $packageJson.packageProvenance
+            }
+            catch {
+              $result.failureClass = 'metadata'
+              if ($_.Exception.Message -notmatch '(?i)checksum|BUILD-INFO|provenance|ZIP|layout|requested package asset|selected package asset|missing required|identity is malformed|major does not match|draft or prerelease') { $result.failureClass = 'download' }
+              throw
+            }
+            try {
+              & pwsh -NoProfile -File ./scripts/Test-PgLogical.ps1 -PgRoot $pgRoot -StagingDir ([string]$packageJson.stagingDir) -UpstreamVersion ([string]$packageJson.packageProvenance.pglogicalVersion) -WorkDir (Join-Path $env:RUNNER_TEMP 'compat-smoke') -AllowTemporaryLocalUser
+              if ($LASTEXITCODE -ne 0) { throw "Compatibility smoke exited with code $LASTEXITCODE." }
+            }
+            catch {
+              if ($_.Exception.Message -match '(?i)initdb|pg_ctl|not ready|permission|access denied|elevat|process|port|data directory|missing bin|could not start') { $result.failureClass = 'environment' } else { $result.failureClass = 'compatibility' }
+              throw
+            }
+            $result.status = 'passed'
+            $result.failureClass = ''
+          }
+          catch {
+            $result.error = $_.Exception.Message.Trim()
+            Write-Host "Compatibility smoke failed for PostgreSQL $($result.postgresqlMajor): $($result.failureClass)"
+            Write-Host $result.error
+          }
+          finally {
+            $result | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $env:RESULT_PATH -Encoding utf8
+          }
+          if ($result.status -ne 'passed') { exit 1 }
+
+      - name: Upload compatibility result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: compatibility-result-pg${{ matrix.entry.postgresqlMajor }}
+          path: ${{ runner.temp }}/compat-result-pg${{ matrix.entry.postgresqlMajor }}.json
+          if-no-files-found: error
+
+  summary:
+    name: Compatibility smoke summary
+    needs: [discover, smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Download smoke results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        continue-on-error: true
+        with:
+          path: compatibility-results
+
+      - name: Publish summary
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -LiteralPath ./compatibility-results -Filter '*.json' -File -Recurse -ErrorAction SilentlyContinue)
+          $results = @($files | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json })
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '## Compatibility smoke'
+          if ($results.Count -eq 0) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'No package required a smoke run.'
+            exit 0
+          }
+          foreach ($item in $results) {
+            $line = "- PostgreSQL $($item.postgresqlMajor): **$($item.status)**"
+            if ($item.failureClass) { $line += " (`$($item.failureClass)`)" }
+            if ($item.error) { $line += " — $($item.error)" }
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $line
+          }
+          if (@($results | Where-Object { $_.status -ne 'passed' }).Count -gt 0) { exit 1 }
+
+  decide:
+    name: Decide targeted rebuild or issue
+    needs: [discover, smoke]
+    if: ${{ always() && needs.discover.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Download smoke results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        continue-on-error: true
+        with:
+          path: compatibility-results
+
+      - name: Compute decisions and apply safe side effects
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PLAN_JSON: ${{ needs.discover.outputs.planJson }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./scripts/common.ps1
+          $planFile = Join-Path $env:RUNNER_TEMP 'compatibility-plan.json'
+          $decisionFile = Join-Path $env:RUNNER_TEMP 'compatibility-decision.json'
+          $resultsDir = Join-Path (Get-Location) 'compatibility-results'
+          if (-not (Test-Path -LiteralPath $resultsDir)) { $null = New-Item -ItemType Directory -Force -Path $resultsDir }
+          $env:PLAN_JSON | Set-Content -LiteralPath $planFile -Encoding utf8
+          & pwsh -NoProfile -File ./scripts/Get-CompatibilityRebuildPlan.ps1 -Repository $env:REPOSITORY -PlanFile $planFile -ResultsDirectory $resultsDir -OutputFile $decisionFile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $decision = Get-Content -LiteralPath $decisionFile -Raw | ConvertFrom-Json
+
+          foreach ($candidate in @($decision.issueCandidates)) {
+            $payload = @{ title = [string]$candidate.title; body = [string]$candidate.body } | ConvertTo-Json -Depth 5
+            $issue = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:REPOSITORY/issues" -Headers (Get-GitHubHeaders) -Method Post -ContentType 'application/json' -Body $payload
+            if ($null -eq $issue.number) { throw "Issue creation returned no issue number for marker $($candidate.marker)." }
+            $allIssues = @(Invoke-GitHubApi -Url "https://api.github.com/repos/$env:REPOSITORY/issues?state=all")
+            if ($null -eq (Find-ExistingReleaseFailureIssue -Issues $allIssues -Marker ([string]$candidate.marker))) { throw "Created issue #$($issue.number) could not be read back by its marker." }
+            Write-Host "Created and verified issue #$($issue.number) for PostgreSQL $($candidate.postgresqlMajor)."
+          }
+
+          $targeted = @($decision.targetedRebuildPlan)
+          if ($targeted.Count -eq 0) {
+            Write-Host 'No targeted rebuild dispatch required.'
+            exit 0
+          }
+          $targetedJson = $targeted | ConvertTo-Json -Depth 10 -Compress -AsArray
+          $validated = @(Test-ReleasePlan -PlanJson $targetedJson)
+          if ($validated.Count -ne $targeted.Count) { throw 'Targeted rebuild plan validation count mismatch; refusing dispatch.' }
+          $targetTags = @($targeted | ForEach-Object { [string]$_.localTag })
+          $marker = "compatibility-rebuild/$($targetTags -join ',')"
+          $dispatchPayload = @{
+            ref = 'main'
+            inputs = @{
+              planJson = $targetedJson
+              dryRun = 'false'
+              rebuildMarker = $marker
+            }
+          } | ConvertTo-Json -Depth 10
+          Invoke-RestMethod -Uri "https://api.github.com/repos/$env:REPOSITORY/actions/workflows/release.yml/dispatches" -Headers (Get-GitHubHeaders) -Method Post -ContentType 'application/json' -Body $dispatchPayload | Out-Null
+          $verified = $false
+          for ($attempt = 1; $attempt -le 6; $attempt++) {
+            Start-Sleep -Seconds 5
+            $runs = @(Invoke-GitHubApi -Url "https://api.github.com/repos/$env:REPOSITORY/actions/workflows/release.yml/runs?event=workflow_dispatch")
+            foreach ($run in $runs) {
+              $runText = [System.Text.StringBuilder]::new()
+              foreach ($propertyName in @('display_title', 'name', 'run_name')) {
+                $property = $run.PSObject.Properties[$propertyName]
+                if ($null -ne $property) { $null = $runText.Append(' ').Append([string]$property.Value) }
+              }
+              if ($runText.ToString() -like "*$marker*") { $verified = $true; Write-Host "Dispatched release workflow run $($run.id) for $($targetTags -join ', ')."; break }
+            }
+            if ($verified) { break }
+          }
+          if (-not $verified) { throw "Release workflow dispatch was accepted but no run with marker '$marker' was visible on read-back." }

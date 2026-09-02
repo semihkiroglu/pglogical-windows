@@ -177,7 +177,7 @@ runners.
   -StagingDir ".build\REL2_4_8\stage" `
   -SourceDir ".build\REL2_4_8\upstream" `
   -Version "2.4.8" -PgMajor 18
-# => .build\packages\pglogical-2.4.8-pg18-windows-x64.zip
+# => .build\packages\pglogical-2.4.8-pg18-w1-x64.zip
 ```
 
 ## Manual CMake usage

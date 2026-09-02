@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
     Packages a staged pglogical build into an installation-oriented ZIP whose
-    name identifies the exact PostgreSQL build version and EDB packaging
+    name identifies the PostgreSQL compatibility major and Windows packaging
     revision, embeds BUILD-INFO.json, and computes the package SHA-256.
 
 .DESCRIPTION
     Produces, for one validated plan entry:
 
-      pglogical-<version>-pg<major>.<minor>-edb<revision>-windows-x64.zip
+      pglogical-<version>-pg<major>-w<revision>-x64.zip
 
     with the layout:
 
@@ -121,12 +121,11 @@ if (-not $SkipLicense -and $SourceDir -and (Test-Path (Join-Path $SourceDir 'COP
     Copy-Item -Path (Join-Path $SourceDir 'COPYRIGHT') -Destination $licenseDest -Force
 }
 
-# Exact-version package name: pglogical-<v>-pg<major>.<minor>-edb<rev>-windows-x64.zip
+# Compatibility-major package name: pglogical-<v>-pg<major>-w<rev>-x64.zip
 $zipName = Get-PackageZipName `
     -PglogicalVersion ([string]$PlanEntry.pglogicalVersion) `
     -PostgresqlMajor ([string]$PlanEntry.postgresqlMajor) `
-    -PostgresqlMinor ([string]$PlanEntry.postgresqlMinor) `
-    -EdbPackagingRevision ([int]$PlanEntry.edbPackagingRevision)
+    -PackagingRevision ([int]$PlanEntry.windowsPackagingRevision)
 $zipPath = Join-Path $OutputDir $zipName
 if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
 
@@ -165,8 +164,7 @@ try {
     $expectedName = Get-PackageZipName `
         -PglogicalVersion ([string]$parsedInfo.pglogicalVersion) `
         -PostgresqlMajor ([string]$parsedInfo.postgresqlCompatibilityMajor) `
-        -PostgresqlMinor ([string]$parsedInfo.postgresqlBuildVersion -split '\.')[1] `
-        -EdbPackagingRevision ([int]$parsedInfo.edbPackagingRevision)
+        -PackagingRevision ([int]$parsedInfo.windowsPackagingRevision)
     if ($zipName -ne $expectedName) {
         throw "ZIP filename '$zipName' does not match BUILD-INFO.json identity '$expectedName'"
     }

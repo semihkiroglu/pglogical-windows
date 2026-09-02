@@ -6,7 +6,7 @@
 | Upstream repository | [{{UPSTREAM_REPO}}](https://github.com/{{UPSTREAM_REPO}}) |
 | Upstream release tag | [{{UPSTREAM_TAG}}](https://github.com/{{UPSTREAM_REPO}}/releases/tag/{{UPSTREAM_TAG}}) |
 | Upstream commit SHA | `{{COMMIT_SHA}}` |
-| Windows packaging revision | windows.{{PACKAGING_REVISION}} |
+| Windows packaging revision | W{{PACKAGING_REVISION}} |
 | PostgreSQL compatibility major | {{PG_MAJOR}} |
 | PostgreSQL exact build version | {{PG_BUILD_VERSION}} |
 | EDB packaging revision | {{EDB_REVISION}} |
@@ -20,9 +20,9 @@
 
 ## Packages
 
-`pglogical-{{VERSION}}-pg{{PG_MAJOR}}.{{PG_MINOR}}-edb{{EDB_REVISION}}-windows-x64.zip`
+`pglogical-{{VERSION}}-pg{{PG_MAJOR}}-w{{PACKAGING_REVISION}}-x64.zip`
 
-The package ZIP name and the embedded `BUILD-INFO.json` identify the exact PostgreSQL build version and EDB packaging revision; the GitHub release tag represents the PostgreSQL compatibility major release stream. Despite the exact build version in the asset name, this package runs on **any** minor of PostgreSQL {{PG_MAJOR}}: PostgreSQL guarantees binary compatibility within a major version, and the server's module magic-block check is major-granular.
+The package ZIP name and GitHub release tag identify the upstream version, PostgreSQL compatibility major, and Windows packaging revision. The exact PostgreSQL build version and EDB packaging revision remain in `BUILD-INFO.json` and the provenance table. This package runs on **any** minor of PostgreSQL {{PG_MAJOR}}: PostgreSQL guarantees binary compatibility within a major version, and the server's module magic-block check is major-granular.
 
 Unzip into a matching PostgreSQL installation directory (e.g. `C:\Program Files\PostgreSQL\{{PG_MAJOR}}`) so that `lib\`, `share\extension\`, and `bin\` merge with the existing layout. Install on both provider and subscriber nodes.
 
