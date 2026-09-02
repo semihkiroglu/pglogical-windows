@@ -23,6 +23,7 @@
 # job, which needs contents: write for the release itself.
 
 name: release
+run-name: release ${{ inputs.rebuildMarker || inputs.upstreamTag || 'manual' }}
 
 on:
   workflow_dispatch:
@@ -52,6 +53,11 @@ on:
         required: false
         type: boolean
         default: false
+      rebuildMarker:
+        description: 'Optional deterministic compatibility-rebuild marker used for dispatch deduplication.'
+        required: false
+        type: string
+        default: ''
   workflow_call:
     inputs:
       planJson:

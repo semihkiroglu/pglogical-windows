@@ -1,264 +1,280 @@
-# RELEASING.md
+# Sürümleme ve otomasyon
 
-How releases are discovered, built, and published, and how to handle
-failures.
+Bu dosya, Windows x64 pglogical paketlerinin nasıl keşfedildiğini, üretildiğini,
+yayınlandığını ve uyumluluk hatalarının nasıl ele alındığını tanımlar. Kaynak
+kodun derlenmesi yalnızca yeni pglogical upstream sürümü veya açıkça gerekçeli
+hedefli uyumluluk yeniden derlemesi için yapılır.
 
-## PostgreSQL matrix synchronization
+## Sürüm kaynakları ve karar sınırları
 
-`pg-versions-sync.yml` runs daily at **03:00 UTC** and is also manually
-dispatchable. It fetches `https://www.postgresql.org/versions.json`, and for
-each supported major resolves the exact EDB Windows x64 binaries artifact
-(including its packaging revision) on the official EDB host before
-considering a new major available. Explicitly EOL majors
-(`supported=false`) are removed from `.github/pg-versions.json`; a transient
-resolution failure retains an already configured major. The workflow
-commits only a real config diff. It refuses to persist an empty derived
-matrix, preserving the last valid configuration for manual review.
+- pglogical upstream sürümü ve tag'i `2ndQuadrant/pglogical` içindeki yayımlanmış
+  sürümden gelir.
+- PostgreSQL güncel minor sürümü `https://www.postgresql.org/versions.json`
+  içindeki `latestMinor` alanından gelir.
+- EDB Windows x64 binaries arşivinin packaging revision değeri, resmi EDB
+  indirme host'unda kontrollü erişilebilirlik yoklamasıyla bulunur. Bu bir EDB
+  manifestosu değil, heuristik bir erişilebilirlik keşfidir.
+- `.github/pg-versions.json` yalnızca yapılandırılmış PostgreSQL major kümesini
+  ve minimum pglogical sürümünü tutar.
+- Upstream kaynak tag'indeki `compat<major>` dizini, o major için derleme
+  yapılabilirliğinin ön koşuludur.
 
-EDB-ready new majors are emitted as candidates, but are not persisted until a
-caller supplies them as compatibility-eligible. This keeps matrix discovery
-separate from the upstream compat/build policy.
+Üç karar birbirinden ayrıdır:
 
-## Exact EDB artifact resolution
+1. **Normal upstream yayınlama:** Yeni pglogical sürümünde eksik major paketleri
+   `windows.1` olarak üretir.
+2. **Uyumluluk smoke:** Yayınlanmış paketi, aynı major'ın güncel EDB artifact'ı
+   üzerinde çalıştırır. Bu yol kaynak checkout'u veya derleme yapmaz.
+3. **Hedefli yeniden derleme:** Smoke yalnızca paket eski EDB artifact'ı ile
+   derlenmiş ve hata uyumluluk sınıfındaysa, etkilenen major için en yüksek
+   mevcut `windows.N + 1` planını üretir.
 
-PostgreSQL minors are pinned to `https://www.postgresql.org/versions.json`
-(the authoritative latest-supported source; the response is validated before
-use). The exact Windows x64 binaries artifact is resolved on the
-EDB-controlled download host (`get.enterprisedb.com`) by **controlled
-availability probing** of
-`postgresql-<major>.<minor>-<revision>-windows-x64-binaries.zip`.
+PostgreSQL minor veya EDB revision değişimi tek başına normal yayınlama nedeni
+ değildir. Aynı major için yayımlanmış paket varsa normal watcher bunu kapsanmış
+sayarak EDB artifact çözümlemesini o major için hiç yapmaz.
 
-This is **heuristic availability discovery, not an authoritative EDB
-manifest** (PostgreSQL's JSON does not carry the EDB packaging revision,
-and no official EDB machine-readable current-artifact feed exists). The
-resolver therefore:
+## PostgreSQL major matrisi
 
-* validates every candidate URL (https, `get.enterprisedb.com`, correct
-  path and archive filename, matching major/minor/revision) before any
-  request;
-* probes with HEAD, falling back to a minimal `Range: bytes=0-0` GET only
-  when HEAD is explicitly unsupported for a non-transient protocol reason
-  (the full ZIP is never downloaded just to check existence);
-* classifies every probe result as **Available / NotFound /
-  TransientFailure / InvalidResponse**. Only a definitive 404/410 — or the
-  observed EDB/CDN 403 `AccessDenied` S3 signature for absent artifacts —
-  means "not present". Timeouts, DNS/TLS/socket failures, 408/425/429/5xx
-  are indeterminate and are retried a bounded number of times with short
-  backoff; after retry exhaustion the run **fails closed** — an older
-  revision is never silently substituted;
-* rejects redirects (none are observed on the EDB host; any redirect —
-  HTTPS downgrade or foreign host — fails closed);
-* probes the **entire bounded revision range** `1..MaxRevision` (default
-  10, configurable for tests), so a gap (`-1` and `-3` present, `-2`
-  absent) still resolves `-3`;
-* returns no artifact only when **every** candidate is conclusively absent,
-  and fails when the highest available revision equals the configured bound
-  (a higher revision may exist beyond it).
+`pg-versions-sync.yml` her gün 03:00 UTC'de ve elle çalıştırılabilir olarak
+çalışır:
 
-Packaging revision `-1` is **never silently assumed**. No third-party
-package manifest (Scoop, Chocolatey, WinGet, …) is ever used as a trust
-source. The resolved artifact is verified to belong to the requested
-major/minor before anything is built, both by filename construction and by
-the installed `PG_VERSION_NUM` after extraction.
+1. pg.org `versions.json` verisini doğrular.
+2. `supported=false` olan yapılandırılmış major'ları çıkarır.
+3. Yeni major için resmi EDB artifact'ının erişilebilirliğini doğrular.
+4. Güncel upstream release kaynağını shallow clone ederek `compat<major>` dizinini
+   doğrular.
+5. Yalnızca pg.org tarafından desteklenen, EDB artifact'ı bulunan ve upstream'de
+   compat dizini bulunan yeni major'ı matrise eklemeye aday yapar.
+6. Gerçek config değişikliği varsa PR açar; boş veya belirsiz matrisi yazmaz.
 
-The downloaded ZIP is cached by filename (and in CI by a cache key that
-includes the exact artifact filename), so a different packaging revision can
-never reuse the wrong cached ZIP. The post-download SHA-256 is calculated
-and recorded in release provenance as a **calculated** checksum — EDB does
-not publish official checksums for these archives, and none is claimed.
+`.github/pg-versions.json` değişikliği merge edildiğinde
+`upstream-watch.yml` ayrıca `push.paths` tetikleyicisiyle çalışır. Böylece yeni
+major için bir sonraki günlük bekleme gerekmez.
 
-## Release-plan pinning
+## EDB artifact çözümleme
 
-`upstream-watch.yml` resolves every EDB artifact **once**, at planning
-time, and dispatches a **single** `release.yml` run carrying the complete
-pinned plan (one entry per missing release × PostgreSQL major, with the
-exact EDB artifact identity per entry — different majors may use different
-EDB revisions). `release.yml` validates the whole plan before any build
-(malformed JSON, duplicate majors, invalid revisions, non-HTTPS/non-EDB
-URLs, filename identity mismatches, upstream tag/commit SHA) and verifies
-every pinned URL is still conclusively available — without re-discovering
-or substituting a newer revision. A newer EDB revision appearing after
-planning is picked up by the next watcher run, not by the current build.
+Aday adı şu biçimdedir:
 
-## Upstream release discovery
-
-`upstream-watch.yml` runs daily at **03:30 UTC** (after the 03:00 UTC
-matrix sync, so it sees the latest config) and is also manually
-dispatchable. It runs on an
-Ubuntu runner (cheap) and:
-
-1. queries the **single latest published release**
-   of `2ndQuadrant/pglogical` via `GET /repos/{owner}/{repo}/releases/latest`
-   (which excludes drafts and prereleases by definition). A 404 (meaning
-   all releases are draft or prerelease) is a silent no-op.
-2. validates the tag against `^REL[0-9]+_[0-9]+_[0-9]+$`;
-3. ignores it if below the **2.4.8 baseline** configured in
-   `.github/pg-versions.json`;
-4. resolves the exact official EDB artifact for every configured PG major
-   (see above); an unresolvable artifact fails the run (fail closed);
-5. lists the local releases and, per PG major, compares the resolved EDB
-   artifact filename with the one recorded in the latest release for that
-   version × major:
-   * no local release → plan `windows.1`;
-   * same artifact filename → covered, no action;
-   * newer artifact (minor and/or packaging revision) → plan the **next
-     packaging revision** for that major only;
-   * older artifact or an unrecorded/unparseable identity → fail closed;
-6. emits an idempotent JSON build plan (single version × N majors, each
-   entry pinning its exact EDB artifact);
-7. does nothing when the latest release is already fully packaged;
-8. dispatches **one** `release.yml` run with the complete pinned plan
-   (plan-entry matrix; every entry carries its own `windows.N` packaging
-   revision and its own pinned EDB artifact — a single global
-   packaging-revision input could not represent per-major differences).
-
-**The EDB artifact identity is the rebuild trigger** — a post-download SHA
-recalculation alone never triggers a release. Once a release exists with the
-current artifact identity recorded, later watcher runs detect it as covered,
-so there are no release loops.
-
-**Semantics change from previous design:** only the single NEWEST missing
-upstream version is ever considered. Intermediate skipped versions are never
-backfilled. The full release-list poll has been replaced with a single
-`/releases/latest` call.
-
-Upstream release events are never listened to directly (external
-repositories cannot deliver them), and the poll is safe to run repeatedly.
-A concurrency group (`upstream-watch`) prevents two schedule/manual
-runs from overlapping, and `release.yml` has a per-version concurrency
-group (`release-<tag>-<revision>`), so the same version can never be
-published twice concurrently.
-
-## Local release tags and packaging revisions
-
-One GitHub release per upstream pglogical release **and** PostgreSQL major:
-
+```text
+postgresql-<major>.<minor>-<revision>-windows-x64-binaries.zip
 ```
+
+Resolver:
+
+- her aday URL'sini HTTPS, `get.enterprisedb.com`, `/postgresql/` yolu ve dosya
+  adı kimliğiyle doğrular;
+- HEAD kullanır, yalnızca HEAD açıkça desteklenmiyorsa `Range: bytes=0-0` GET'e
+  düşer;
+- tüm `1..MaxRevision` aralığını yoklar; aradaki boşluklar geçerlidir;
+- 404/410 veya EDB S3 `AccessDenied` imzasını kesin yokluk sayar;
+- timeout, DNS/TLS/socket, 408/425/429/5xx ve belirsiz 403 yanıtlarını retry
+  sonrası fail-closed olarak bırakır;
+- yönlendirmeleri kabul etmez;
+- en yüksek bulunan revision probe sınırına eşitse daha yüksek revision
+  olabileceği için yine fail-closed davranır;
+- hiçbir durumda revision `-1` varsaymaz veya daha eski artifact'a sessizce
+  düşmez.
+
+CI cache anahtarı tam artifact dosya adını içerir. İndirme sonrası hesaplanan
+SHA-256 release provenance'a yazılır; EDB tarafından yayımlanmış checksum gibi
+sunulmaz.
+
+## Normal upstream watcher
+
+`upstream-watch.yml` her gün 03:30 UTC'de ve elle çalıştırılabilir olarak
+çalışır. Ayrıca `.github/pg-versions.json` merge edildiğinde tetiklenir.
+
+Watcher:
+
+1. `GET /repos/2ndQuadrant/pglogical/releases/latest` ile tek yayımlanmış
+   upstream release'i alır. Draft veya prerelease yoksa 404 sonucu sessiz no-op'tur.
+2. Tag'i `^REL[0-9]+_[0-9]+_[0-9]+$` ile doğrular ve baseline altındaki sürümü
+   reddeder.
+3. Exact upstream commit SHA'sını çözer ve kaynak checkout'unda doğrular.
+4. Configured major ile upstream `compat<major>` kesişimini hesaplar.
+5. Yerel stable release'leri listeler ve her compatible major için coverage'ı
+   tag kimliğiyle (`pglogical-<version>-pg<major>-windows.<revision>`) arar.
+6. Yerel coverage yoksa yalnızca o major için `windows.1` planlar.
+7. Coverage bulunan major için güncel minor/revision farklı olsa bile yeni plan
+   üretmez ve EDB çözümlemez.
+8. Eksik major'ların exact EDB artifact'larını bir kez çözer ve tek pinned
+   `release.yml` dispatch'i gönderir.
+
+Plan girdisi; pglogical sürümü, upstream tag/SHA, PostgreSQL major/minor/build
+version, Windows packaging revision, EDB packaging revision, dosya adı ve URL'yi
+birlikte taşır. `release.yml` bu planı doğrulamadan hiçbir Windows build'i
+başlatmaz ve pinned URL yerine başka artifact seçmez.
+
+## Tag ve asset biçimi
+
+Her upstream sürümü ve PostgreSQL major için ayrı GitHub release/tag vardır:
+
+```text
 pglogical-2.4.8-pg14-windows.1
-pglogical-2.4.8-pg15-windows.1
+pglogical-2.4.8-pg18-windows.1
 ```
 
-* `2.4.8` identifies the upstream release.
-* `pg14` identifies the PostgreSQL major the package was built for.
-* `windows.1` is the packaging revision.
-* A new pglogical upstream version always starts at `windows.1`.
-* A rebuild of the same pglogical version and PostgreSQL major caused by an
-  EDB artifact change (new packaging revision or new filename of the exact
-  official artifact) is released as the next revision (`windows.2`,
-  `windows.3`, …) for the affected major(s) only. The watcher computes the
-  next revision as the highest existing revision plus one; an existing tag
-  is never overwritten or silently reused.
-* A rebuild caused only by packaging changes (e.g. a fix in the ZIP layout
-  or the release tooling, not in the pglogical source) can also be released
-  as the next revision by dispatching `release.yml` with an explicit
-  `packagingRevision`.
-* Published releases are never overwritten or mutated; existing assets are
-  never silently replaced. `release.yml` checks for an existing
-  release before creating one and skips publication if it already exists.
+- `2.4.8`: upstream pglogical sürümü;
+- `pg18`: PostgreSQL compatibility major;
+- `windows.1`: Windows packaging revision;
+- yeni upstream sürümü her major için `windows.1` ile başlar;
+- targeted compatibility rebuild aynı sürüm ve major için en yüksek mevcut
+  revision'ın bir üstünü kullanır; eski tag veya release üzerine yazılmaz.
 
-## Release build pipeline
+ZIP asset'i exact build input'ını taşır:
 
-`release.yml` (reusable + manually dispatchable) for one upstream tag:
+```text
+pglogical-<version>-pg<major>.<minor>-edb<revision>-windows-x64.zip
+```
 
-1. **resolve** (Ubuntu): validates the release (exists, published, tag
-   pattern, >= baseline), resolves the exact upstream commit SHA, computes
-   the PostgreSQL major matrix = configured majors in
-   `.github/pg-versions.json` ∩ the upstream `compat<major>` directories,
-   and resolves the exact official EDB artifact for every feasible major
-   (fail closed when any is unresolvable). An optional `postgresMajors`
-   input restricts the matrix (used by CI). When a pinned `planJson` input
-   is supplied (the watcher path), the whole plan is validated first and
-   every pinned EDB URL is verified still available — no discovery or
-   substitution happens in the build.
-2. **build** (Windows, per plan entry): installs the exact pinned EDB
-   Windows binaries into an isolated directory (reused only on exact
-   artifact-identity match via `EDB-INSTALL-INFO.json`, cached under the
-   exact artifact filename), clones the exact upstream tag, verifies the
-   expected upstream commit SHA against the checkout (always, even for
-   caller-supplied checkouts), builds with CMake + MSVC, verifies DLL
-   exports with `dumpbin`, runs the smoke test, packages the exact-version
-   ZIP (`pglogical-<v>-pg<major>.<minor>-edb<rev>-windows-x64.zip`) with an
-   embedded `BUILD-INFO.json`, and records the EDB artifact filename and
-   its calculated SHA-256.
-3. **publish** (Ubuntu, `contents: write` only here): downloads all
-   artifacts, verifies the expected ZIP name/count and every SHA-256
-   locally, creates a **draft** release pinned to the validated commit
-   (`--target $GITHUB_SHA`) with a title identifying the compatibility
-   major and the exact build input, uploads all ZIPs and the aggregate
-   `SHA256SUMS.txt`, and only then publishes the release. The release body
-   records distinct provenance fields: pglogical version, upstream repo /
-   tag / commit SHA, Windows packaging revision, PostgreSQL compatibility
-   major, exact build version, EDB packaging revision, EDB artifact
-   filename, EDB artifact URL, and the project-calculated EDB archive
-   SHA-256. On any failure the incomplete draft is deleted; a failed build
-   never leaves a partial release.
-4. **set-latest** (Ubuntu): after every publish job succeeds, GitHub
-   Latest is reconciled deterministically — the highest **configured**
-   PostgreSQL major with a published (non-draft, non-prerelease) release
-   for this pglogical version is selected from **all** existing releases,
-   not from the current change set alone (so rebuilding only PG15 cannot
-   steal Latest from an existing PG18 release).
+Her yayımlanmış release'te tam olarak bir package ZIP ve bir `SHA256SUMS.txt`
+bulunur. ZIP içinde `BUILD-INFO.json`, `lib/`, `share/extension/` ve `bin/`
+gerekli dosyaları vardır.
 
-## Manual dispatch
+## Release build akışı
+
+`release.yml` reusable ve elle dispatch edilebilir bir workflow'dur.
+
+### Resolve
+
+- `planJson` verilmişse bütün plan girdilerini doğrular;
+- upstream tag/SHA, major/minor/build version, revision ve EDB URL/dosya adı
+  tutarlılığını kontrol eder;
+- pinned EDB URL'nin hâlâ erişilebilir olduğunu doğrular, fakat yeni artifact
+  keşfetmez;
+- `planJson` yoksa elle verilen upstream tag için configured major ∩ upstream
+  compat kümesini ve exact EDB artifact'larını çözer.
+
+### Windows build ve smoke
+
+Her plan girdisi için:
+
+1. exact EDB binaries ZIP'i indirir veya tam kimlik eşleşiyorsa cache'ten kullanır;
+2. upstream tag'ini shallow clone eder ve commit SHA'sını doğrular;
+3. CMake + MSVC/clang-cl ile derler;
+4. export yüzeyini ve bağımsız subscriber utility'yi doğrular;
+5. gerçek PostgreSQL cluster'ında extension, logical slot ve provider→subscriber
+   smoke testini çalıştırır;
+6. exact-name package ZIP'i ve checksum satırını üretir;
+7. `BUILD-INFO.json` içine kaynak ve artifact provenance'ını yazar.
+
+### Publish
+
+Tüm Windows matrix işleri başarılı olmadan publish başlamaz. Publish job'ı:
+
+- ZIP sayısını/adını ve checksum'ı yeniden doğrular;
+- release'i doğrudan yayımlanmış olarak, immutable asset'lerle oluşturur;
+- upstream tag/SHA, compatibility major, exact build version, EDB artifact ve
+  hesaplanan checksum provenance'ını release body'ye koyar;
+- publish sonrası release ve asset'leri okuyarak doğrular;
+- GitHub Latest değerini configured major'lar arasından deterministik olarak
+  seçer.
+
+Mevcut release veya asset hiçbir zaman overwrite edilmez.
+
+## Compatibility smoke
+
+`compatibility-smoke.yml` her gün 04:30 UTC'de veya elle çalıştırılabilir.
+`force=true` verilirse coverage bulunan paketleri de test eder; rebuild kuralını
+değiştirmez.
+
+Discover job'ı her configured major için güncel exact EDB artifact'ını bulur ve
+en yeni published local release'i seçer:
+
+- local release yoksa `pending`;
+- release body'deki EDB artifact dosya adı güncel artifact ile aynıysa `covered`;
+- farklıysa `test`;
+- body/asset provenance eksikse `test` + `metadata` failure class.
+
+Windows smoke job'ı yalnızca `test` girdilerinde çalışır. Published release'i
+tag ile bulur, tam bir ZIP ve `SHA256SUMS.txt` indirir, ZIP checksum'ını
+kontrol eder, path traversal'ı reddeder, izole staging'e çıkarır ve
+`BUILD-INFO.json` kimliğini tag/major/asset ile karşılaştırır. Sonra mevcut EDB
+kurulumu üzerinde `Test-PgLogical.ps1` çalışır. Bu workflow'da upstream source
+checkout'u, `Build-PgLogical.ps1` veya herhangi bir source compilation yoktur.
+
+Sonuçlar şu sınıflardan biriyle raporlanır:
+
+- `download`: release/API/EDB/package indirme problemi;
+- `metadata`: ZIP, checksum, asset veya provenance problemi;
+- `compatibility`: aynı kurulumda extension/smoke davranışı problemi;
+- `environment`: runner, PostgreSQL başlatma veya izin problemi.
+
+## Targeted rebuild ve loop guard
+
+Yalnızca `status=failed` ve `failureClass=compatibility` sonucu targeted rebuild'e
+adaydır. Karar wrapper'ı:
+
+- eski package artifact'ı ile current server artifact'ını karşılaştırır;
+- current artifact daha yeniyse yalnızca etkilenen major için en yüksek mevcut
+  `windows.N + 1` planını oluşturur;
+- aynı artifact ile smoke başarısızsa otomatik rebuild oluşturmaz;
+- aynı deterministic marker'a sahip GitHub issue zaten varsa yeni issue açmaz;
+- aynı target tag release listesinde veya çalışan/queued release workflow'unda
+  varsa yeni dispatch yapmaz;
+- başka failure class'larını rebuild'e dönüştürmez;
+- artifact kimliği geriye gidiyorsa fail-closed olur.
+
+Targeted dispatch `release.yml`'e tam pinned `planJson` ve
+`rebuildMarker` input'uyla yapılır. Dispatch sonrası run adı marker ile okunarak
+etkinin gerçekten oluştuğu doğrulanır. Aynı artifact smoke hatası issue body'sine
+şu tür deterministic marker koyar:
+
+```text
+<!-- pglogical-compatibility-failure: pg18/<package-tag>/<artifact-filename> -->
+```
+
+## Manuel komutlar
+
+Normal release planını görmek için:
+
+```powershell
+pwsh ./scripts/Get-UpstreamReleases.ps1 -OutputFile .build/release-plan.json
+```
+
+Published release paketini doğrulamak için:
+
+```powershell
+pwsh ./scripts/Install-PgLogicalReleasePackage.ps1 `
+  -ReleaseTag pglogical-2.4.8-pg18-windows.1 `
+  -PostgresqlMajor 18 `
+  -Repository semihkiroglu/pglogical-windows `
+  -OutputDir .build/compat-package
+```
+
+Release workflow'u elle tetiklemek için:
 
 ```bash
-# Build + publish pglogical 2.4.8 for all supported majors (discovery mode):
-gh workflow run release.yml -f upstreamTag=REL2_4_8 -f packagingRevision=1
-
-# Build + publish from a pinned plan (the watcher path; plan entries carry
-# the exact per-major EDB artifact and packaging revision):
-gh workflow run release.yml -f planJson='[{"pglogicalVersion":"2.4.8", ...}]'
-
-# Rebuild without touching the release (e.g. for CI experiments):
 gh workflow run release.yml -f upstreamTag=REL2_4_8 -f dryRun=true
-
-# Build only some majors:
-gh workflow run release.yml -f upstreamTag=REL2_4_8 -f postgresMajors=17,18
+gh workflow run release.yml -f planJson='[{"pglogicalVersion":"2.4.8", "...":"pinned entry"}]'
 ```
 
-## Failure recovery
+Compatibility smoke'u zorlamak için:
 
-* **A build job fails:** fix the issue in a PR (CI re-runs the whole
-  pipeline in dry-run mode), then re-run `release.yml`. The failed run
-  never created a release, so nothing needs cleanup.
-* **Publication fails mid-way:** the draft release is deleted by the
-  cleanup step. Verify with `gh release list --exclude-drafts`; if a draft
-  remains, delete it (`gh release delete <tag> --yes --cleanup-tag`) and
-  re-run.
-* **A release already exists:** publication is skipped, never overwritten.
-  If the release is broken beyond repair, publish a new packaging revision
-  (`-f packagingRevision=2`) instead of mutating the old one.
-* **Upstream tag disappears or is force-changed:** the resolve step fails
-  with a clear error; nothing is published. Re-verify the upstream release
-  before retrying.
-* **The exact EDB artifact cannot be resolved:** the watcher and the
-  release pipeline both fail closed with a clear error; nothing is planned
-  or published. Check pg.org versions.json and get.enterprisedb.com
-  availability, then re-run.
+```bash
+gh workflow run compatibility-smoke.yml -f force=true
+```
 
-## Adding or retiring a PostgreSQL major
+## Arıza davranışı
 
-`.github/pg-versions.json` is the source of truth for the configured majors:
+- API, EDB veya checksum belirsizliği: fail-closed; daha eski artifact'a düşülmez.
+- Windows smoke environment/download hatası: targeted rebuild dispatch edilmez.
+- Aynı artifact compatibility hatası: duplicate-safe issue açılır, rebuild yoktur.
+- Daha yeni artifact compatibility hatası: yalnızca etkilenen major için
+  `windows.N+1` pinned dispatch yapılır.
+- Release build/publish hatası: başarısız run issue raporlar; yayımlanmış
+  release ve asset mutasyonu yapılmaz.
+- Config PR'si mevcutsa ikinci otomatik config PR'si açılmaz.
 
-* **Add a major** (e.g. 19 after it becomes stable): matrix synchronization
-  reports a candidate only after pg.org support and the EDB artifact
-  resolution pass. A caller must also establish upstream compatibility
-  before supplying the major as eligible for persistence. Minor versions
-  are never pinned — they are always derived from pg.org at build time.
-* **Retire a major:** remove its entry. Builds for it stop immediately.
-  `pg-versions-sync.yml` also auto-removes explicitly EOL majors (`supported=false`
-  in pg.org data).
-* **Minor versions are automatic:** `scripts/Install-PostgreSql.ps1`
-  derives the latest minor from pg.org on every run and resolves the exact
-  packaging revision from the official EDB host. No manual minor bumps are
-  needed. The CI cache key includes the exact EDB artifact filename, so
-  installers re-download automatically when the artifact changes.
+## Değişmezlik ve provenance
 
-## Release body contents
+Published release'ler ve asset'ler immutable kabul edilir. Her package'ın
+`BUILD-INFO.json` dosyası şunları kaydeder:
 
-Each release body records: pglogical version, upstream repository/release,
-upstream commit SHA, packaging revision, the PostgreSQL major the package
-was built for, the exact EDB binaries archive filename and URL, the
-calculated post-download EDB SHA-256, toolchain details, the build workflow
-run URL, the package checksums, and the unofficial-build disclaimer. The
-template lives at `.github/release-body-template.md`.
+- pglogical sürümü ve upstream repository/tag/commit SHA'sı;
+- PostgreSQL compatibility major ve exact build version;
+- EDB packaging revision, artifact dosya adı/URL'si ve proje tarafından
+  download sonrası hesaplanan SHA-256;
+- Windows packaging revision, mimari ve configuration.
+
+Bu proje resmi PostgreSQL, EDB veya upstream pglogical dağıtımı değildir.

@@ -68,9 +68,7 @@ jobs:
             if ($latest) {
               Write-Host "Latest upstream release: $($latest.tag_name)"
               git clone --quiet --depth 1 --branch $latest.tag_name "https://github.com/$repo.git" upstream
-              $compatDirs = @(Get-ChildItem upstream -Directory -Filter 'compat*' | ForEach-Object {
-                if ($_.Name -match '^compat([0-9]+)$') { $matches[1] }
-              })
+              $compatDirs = @(Get-UpstreamCompatibilityMajors -SourceDir (Join-Path (Get-Location) 'upstream'))
               $eligible = @($candidates | Where-Object { $compatDirs -contains $_ })
               $blocked = @($candidates | Where-Object { $compatDirs -notcontains $_ })
               Write-Host "Upstream $($latest.tag_name) compat dirs: $($compatDirs -join ', ')"

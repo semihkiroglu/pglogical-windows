@@ -1,25 +1,22 @@
-# upstream-watch.yml — discovers the latest upstream pglogical release,
-# detects EDB artifact identity changes (packaging revision or filename) for
-# supported PostgreSQL majors, and dispatches ONE release.yml run with the
-# complete pinned plan (all missing release × major entries in a single
-# plan-entry matrix).
+# upstream-watch.yml — discovers the latest upstream pglogical release and
+# dispatches one pinned release.yml plan for missing upstream-compatible majors.
+# A published local release for the same upstream version × major is coverage;
+# PostgreSQL minor/EDB revision drift is handled only by compatibility-smoke.
 #
-# Runs daily on an Ubuntu runner (cheap) and only dispatches Windows builds
-# when something is actually missing: a brand-new upstream version, or an
-# exact EDB artifact resolved by controlled availability probing of the
-# EDB-controlled download host (PostgreSQL.org versions.json stays the
-# authoritative current-major/minor source) that differs from the one
-# recorded in the latest release for that version × major (rebuild at the
-# next Windows packaging revision). The build itself happens in
-# release.yml, which has per-version concurrency protection.
+# Runs daily on an Ubuntu runner and also reacts to a merged
+# .github/pg-versions.json change so a newly configured major is packaged
+# without waiting for the next schedule.
 #
 # We deliberately do NOT listen for upstream release events: external
-# repositories cannot deliver events to this workflow, and the /releases/latest
-# API is idempotent and safe to poll.
+# repositories cannot deliver events to this workflow, and /releases/latest is
+# idempotent and safe to poll.
 
 name: upstream-watch
 
 on:
+  push:
+    paths:
+      - '.github/pg-versions.json'
   schedule:
     # Off-hour daily run; deliberately not minute zero to avoid load spikes.
     - cron: '30 3 * * *'

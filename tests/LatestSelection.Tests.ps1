@@ -1,7 +1,6 @@
 <#
 .SYNOPSIS
-    Unit tests for Select-LatestRelease: deterministic GitHub Latest selection
-    across ALL published releases for a pglogical version.
+    Unit tests for deterministic per-major and repository-Latest selection.
 #>
 [CmdletBinding()]
 param()
@@ -16,7 +15,7 @@ function New-Release {
         [switch]$Draft,
         [switch]$Prerelease
     )
-    return [pscustomobject]@{ tag_name = $Tag; draft = [bool]$Draft; prerelease = [bool]$Prerelease }
+    return [pscustomobject]@{ tag_name = $Tag; draft = [bool]$Draft; prerelease = [bool]$Prerelease; body = ''; assets = @() }
 }
 
 $version = '2.4.8'
@@ -74,7 +73,6 @@ Test-Case 'Latest: unrelated pglogical versions are ignored' {
 }
 
 Test-Case 'Latest: unconfigured higher major is ignored' {
-    # PG19 exists as a release but is not in the configured majors list.
     $releases = @(
         (New-Release -Tag 'pglogical-2.4.8-pg19-windows.1'),
         (New-Release -Tag 'pglogical-2.4.8-pg18-windows.1')
@@ -92,6 +90,15 @@ Test-Case 'Latest: for one major with multiple revisions, the newest revision wi
         (New-Release -Tag 'pglogical-2.4.8-pg18-windows.2')
     )
     Assert-Equal 'pglogical-2.4.8-pg18-windows.2' (Select-LatestRelease -Version $version -Majors $majors -Releases $releases)
+}
+
+Test-Case 'Per-major selection chooses a higher upstream version before revision' {
+    $releases = @(
+        (New-Release -Tag 'pglogical-2.4.8-pg14-windows.9'),
+        (New-Release -Tag 'pglogical-2.4.9-pg14-windows.1')
+    )
+    $latest = Select-LatestReleaseForMajor -Major '14' -Releases $releases
+    Assert-Equal 'pglogical-2.4.9-pg14-windows.1' $latest.tag_name
 }
 
 Complete-Tests
