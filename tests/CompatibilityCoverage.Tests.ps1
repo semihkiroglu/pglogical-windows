@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'test-helpers.ps1')
 . (Join-Path $PSScriptRoot '..\scripts\common.ps1')
 
-Test-Case 'Passed smoke results are persisted once and remain deduplicated' {
+Test-Case 'Passed smoke results are persisted once and remain deduplicated for a unified release' {
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ("compatibility-coverage-" + [guid]::NewGuid().ToString('N'))
     $coverageFile = Join-Path $root 'compatibility-coverage.json'
     $resultsDirectory = Join-Path $root 'results'
@@ -29,7 +29,7 @@ Test-Case 'Passed smoke results are persisted once and remain deduplicated' {
             serverBuildVersion = '18.6'
             serverEdbArtifactFilename = 'postgresql-18.6-2-windows-x64-binaries.zip'
             serverEdbArtifactUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.6-2-windows-x64-binaries.zip'
-            localReleaseTag = '2.4.8-pg18-w1'
+            localReleaseTag = '2.4.8-w1'
             localPackageAssetName = 'pglogical-2.4.8-pg18-w1-x64.zip'
             localPackageBuildArtifactFilename = 'postgresql-18.5-1-windows-x64-binaries.zip'
             packageProvenance = [ordered]@{
@@ -45,13 +45,14 @@ Test-Case 'Passed smoke results are persisted once and remain deduplicated' {
 
         $state = Get-Content -LiteralPath $coverageFile -Raw | ConvertFrom-Json
         Assert-Equal 1 @($state.entries).Count
+        Assert-Equal '2.4.8-w1' $state.entries[0].localReleaseTag
         Assert-Equal 'postgresql-18.6-2-windows-x64-binaries.zip' $state.entries[0].serverEdbArtifactFilename
 
         [ordered]@{
             schemaVersion = 1
             entries = @([ordered]@{
                 postgresqlMajor = '17'
-                localReleaseTag = '2.4.8-pg17-w1'
+                localReleaseTag = '2.4.8-w1'
                 localPackageAssetName = 'pglogical-2.4.8-pg17-w1-x64.zip'
                 localPackageBuildArtifactFilename = 'postgresql-17.10-1-windows-x64-binaries.zip'
                 serverEdbArtifactFilename = 'postgresql-17.11-3-windows-x64-binaries.zip'

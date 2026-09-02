@@ -71,9 +71,9 @@ not publish official checksums for these archives, and none is claimed.
 
 `upstream-watch.yml` resolves every EDB artifact **once**, at planning
 time, and dispatches a **single** `release.yml` run carrying the complete
-pinned plan (one entry per missing release × PostgreSQL major, with the
-exact EDB artifact identity per entry — different majors may use different
-EDB revisions). `release.yml` validates the whole plan before any build
+pinned plan (one entry per PostgreSQL major in one unified release, with the
+exact EDB artifact identity per entry — different majors may use different EDB
+revisions). `release.yml` validates the whole plan before any build
 (malformed JSON, duplicate majors, invalid revisions, non-HTTPS/non-EDB
 URLs, filename identity mismatches, upstream tag/commit SHA) and verifies
 every pinned URL is still conclusively available — without re-discovering
@@ -96,21 +96,21 @@ Ubuntu runner (cheap) and:
    `.github/pg-versions.json`;
 4. resolves the exact official EDB artifact for every configured PG major
    (see above); an unresolvable artifact fails the run (fail closed);
-5. lists the local releases and, per PG major, compares the resolved EDB
-   artifact filename with the one recorded in the latest release for that
-   version × major:
-   * no local release → plan `w1`;
-   * same artifact filename → covered, no action;
-   * newer artifact (minor and/or packaging revision) → plan the **next
-     packaging revision** for that major only;
-   * older artifact or an unrecorded/unparseable identity → fail closed;
-6. emits an idempotent JSON build plan (single version × N majors, each
-   entry pinning its exact EDB artifact);
+5. lists the local releases and compares unified package coverage:
+   * no local release or no complete unified release → plan `w1` (or the
+     next unused unified revision);
+   * a published unified release with the expected package asset for every
+     configured major → covered, no action;
+   * legacy per-major releases are read as migration coverage only;
+   * an incomplete unified release → plan the next revision with **all**
+     configured major assets, because a published release is immutable;
+6. emits an idempotent JSON build plan (one unified version × Windows revision,
+   with one entry per PostgreSQL major and each entry pinning its exact EDB
+   artifact);
 7. does nothing when the latest release is already fully packaged;
-8. dispatches **one** `release.yml` run with the complete pinned plan
-   (plan-entry matrix; every entry carries its own `wN` packaging
-   revision and its own pinned EDB artifact — a single global
-   packaging-revision input could not represent per-major differences).
+8. dispatches **one** `release.yml` run with the complete pinned plan. The
+   build jobs remain a PostgreSQL matrix, but publication is a single job that
+   attaches every ZIP and one aggregate checksum file to one GitHub release.
 
 **The EDB artifact identity is the rebuild trigger** — a post-download SHA
 recalculation alone never triggers a release. Once a release exists with the
@@ -125,38 +125,41 @@ backfilled. The full release-list poll has been replaced with a single
 Upstream release events are never listened to directly (external
 repositories cannot deliver them), and the poll is safe to run repeatedly.
 A concurrency group (`upstream-watch`) prevents two schedule/manual
-runs from overlapping, and `release.yml` has a per-version concurrency
-group (`release-<tag>-<revision>`), so the same version can never be
-published twice concurrently.
+runs from overlapping, and `release.yml` has a unified per-version
+concurrency group (`release-<workflow>-<ref>`), so only one aggregate
+release can be published at a time.
 
 ## Local release tags and packaging revisions
 
-One GitHub release per upstream pglogical release **and** PostgreSQL major:
+One GitHub release per upstream pglogical release and Windows packaging
+revision, with one asset per configured PostgreSQL major:
 
 ```
-Release title: 2.4.8 for PostgreSQL 14 (W1)
-Git tag:       2.4.8-pg14-w1
-Package:       pglogical-2.4.8-pg14-w1-x64.zip
+Release title: 2.4.8 for Windows (W1)
+Git tag:       2.4.8-w1
+Packages:      pglogical-2.4.8-pg14-w1-x64.zip ... pglogical-2.4.8-pg18-w1-x64.zip
+Checksum:      SHA256SUMS.txt
 ```
 
 * `2.4.8` identifies the upstream release.
-* `pg14` identifies the PostgreSQL major the package was built for.
-* `w1` is the Windows packaging revision in the Git tag and package filename;
-  the release title renders it as `W1`.
-* A new pglogical upstream version always starts at `w1`.
-* A rebuild of the same pglogical version and PostgreSQL major caused by an
-  EDB artifact change (new packaging revision or new filename of the exact
-  official artifact) is released as the next revision (`w2`, `w3`, …) for the
-  affected major(s) only. The watcher computes the
-  next revision as the highest existing revision plus one; an existing tag
-  is never overwritten or silently reused.
-* A rebuild caused only by packaging changes (e.g. a fix in the ZIP layout
-  or the release tooling, not in the pglogical source) can also be released
-  as the next revision by dispatching `release.yml` with an explicit
+* `w1` identifies the unified Windows packaging revision in the Git tag and in
+  every major-specific package filename; the release title renders it as `W1`.
+* The PostgreSQL major belongs to the package asset identity, not the GitHub
+  release identity.
+* A new pglogical upstream version starts at unified `w1`.
+* If any configured major needs a compatibility rebuild, the next unified
+  revision (`w2`, `w3`, …) rebuilds and publishes **all** configured majors so
+  every release remains self-contained. The watcher computes the next revision
+  as the highest existing unified revision plus one; an existing tag is never
+  overwritten or silently reused.
+* A rebuild caused only by packaging changes (e.g. a fix in the ZIP layout or
+  release tooling, not in the pglogical source) can also be released as the
+  next unified revision by dispatching `release.yml` with an explicit
   `packagingRevision`.
 * Published releases are never overwritten or mutated; existing assets are
-  never silently replaced. `release.yml` checks for an existing
-  release before creating one and skips publication if it already exists.
+  never silently replaced. `release.yml` checks for an existing release before
+  creating one and verifies a pre-existing tag has the complete expected asset
+  set before skipping publication.
 
 ## Release build pipeline
 
@@ -178,28 +181,49 @@ Package:       pglogical-2.4.8-pg14-w1-x64.zip
    exact artifact filename), clones the exact upstream tag, verifies the
    expected upstream commit SHA against the checkout (always, even for
    caller-supplied checkouts), builds with CMake + MSVC, verifies DLL
-   exports with `dumpbin`, runs the smoke test, packages the compatibility-major
-   ZIP (`pglogical-<v>-pg<major>-w<rev>-x64.zip`) with an
-   embedded `BUILD-INFO.json`, and records the EDB artifact filename and
-   its calculated SHA-256.
-3. **publish** (Ubuntu, `contents: write` only here): downloads all
-   artifacts, verifies the expected ZIP name/count and every SHA-256
-   locally, creates a **draft** release pinned to the validated commit
-   (`--target $GITHUB_SHA`) with a title identifying the compatibility major and Windows packaging revision,
- uploads all ZIPs and the aggregate
-   `SHA256SUMS.txt`, and only then publishes the release. The release body
-   records distinct provenance fields: pglogical version, upstream repo /
-   tag / commit SHA, Windows packaging revision, PostgreSQL compatibility
-   major, exact build version, EDB packaging revision, EDB artifact
-   filename, EDB artifact URL, and the project-calculated EDB archive
-   SHA-256. On any failure the incomplete draft is deleted; a failed build
-   never leaves a partial release.
-4. **set-latest** (Ubuntu): after every publish job succeeds, GitHub
-   Latest is reconciled deterministically — the highest **configured**
-   PostgreSQL major with a published (non-draft, non-prerelease) release
-   for this pglogical version is selected from **all** existing releases,
-   not from the current change set alone (so rebuilding only PG15 cannot
-   steal Latest from an existing PG18 release).
+   exports with `dumpbin`, runs the smoke test, and packages the
+   compatibility-major ZIP (`pglogical-<v>-pg<major>-w<rev>-x64.zip`) with an
+   embedded `BUILD-INFO.json`. Each build also records the EDB artifact
+   filename and its calculated SHA-256 for the aggregate publisher.
+3. **publish** (Ubuntu, `contents: write` only here): downloads every
+   `packages-pg<major>` artifact from the matrix, verifies exactly one expected
+   ZIP and its checksum/provenance per configured major, creates one **draft**
+   release pinned to the validated commit (`--target $GITHUB_SHA`) with the
+   title `<version> for Windows (W<revision>)`, uploads all ZIPs and one
+   aggregate `SHA256SUMS.txt`, and only then publishes the release. The release
+   body records one provenance section per PostgreSQL major: exact build
+   version, EDB packaging revision, EDB artifact filename/URL, and the
+   project-calculated EDB archive SHA-256. On any failure the incomplete draft
+   is deleted; a failed build never leaves a partial release.
+4. **set-latest** (Ubuntu): after the single publish job succeeds, GitHub
+   Latest is reconciled deterministically to the complete unified release for
+   this pglogical version. The selector requires every configured major's ZIP
+   asset, so a partial release can never become Latest.
+## One-time legacy release migration
+
+The repository may contain historical per-major tags such as
+`2.4.8-pg18-w1`. They are read-only migration inputs and are not produced by
+new code. To migrate an existing version, generate an explicit full unified
+plan:
+
+```bash
+pwsh -NoProfile -File ./scripts/Get-UpstreamReleases.ps1 \
+  -ForceUnified -OutputFile /tmp/pglogical-unified-migration-plan.json
+
+# Extract only the validated plan-entry array for planJson:
+pwsh -NoProfile -Command '$p = Get-Content /tmp/pglogical-unified-migration-plan.json -Raw | ConvertFrom-Json; $p.plan | ConvertTo-Json -Compress -Depth 10 | Set-Content /tmp/pglogical-unified-plan-entries.json'
+
+# Inspect the entry array, then dispatch it as a pinned plan:
+gh workflow run release.yml \
+  -f planJson="$(< /tmp/pglogical-unified-plan-entries.json)"
+```
+
+Do not delete historical releases until the new unified release has completed
+and its tag, complete ZIP asset set, aggregate checksum, and `releases/latest`
+read-back have all been verified. If the unified publication fails, leave the
+historical releases intact and investigate the failed run. After successful
+verification, delete only the explicitly identified legacy release/tag pairs;
+never reuse an immutable tag.
 
 ## Manual dispatch
 
@@ -207,8 +231,8 @@ Package:       pglogical-2.4.8-pg14-w1-x64.zip
 # Build + publish pglogical 2.4.8 for all supported majors (discovery mode):
 gh workflow run release.yml -f upstreamTag=REL2_4_8 -f packagingRevision=1
 
-# Build + publish from a pinned plan (the watcher path; plan entries carry
-# the exact per-major EDB artifact and packaging revision):
+# Build + publish from a pinned unified plan (the watcher path; one entry
+# per major, all entries share one <version>-w<revision> tag):
 gh workflow run release.yml -f planJson='[{"pglogicalVersion":"2.4.8", ...}]'
 
 # Rebuild without touching the release (e.g. for CI experiments):
@@ -258,9 +282,10 @@ gh workflow run release.yml -f upstreamTag=REL2_4_8 -f postgresMajors=17,18
 
 ## Release body contents
 
-Each release body records: pglogical version, upstream repository/release,
-upstream commit SHA, packaging revision, the PostgreSQL major the package
-was built for, the exact EDB binaries archive filename and URL, the
-calculated post-download EDB SHA-256, toolchain details, the build workflow
-run URL, the package checksums, and the unofficial-build disclaimer. The
-template lives at `.github/release-body-template.md`.
+Each unified release body records: pglogical version, upstream
+repository/release, upstream commit SHA, Windows packaging revision, one
+provenance section per PostgreSQL major (exact build version, EDB packaging
+revision, EDB binaries archive filename and URL, and the calculated
+post-download EDB SHA-256), toolchain details, the build workflow run URL, the
+aggregate package checksums, and the unofficial-build disclaimer. The template
+lives at `.github/release-body-template.md`.

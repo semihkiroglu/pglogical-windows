@@ -102,25 +102,35 @@ only as compatible with your PostgreSQL version as the upstream source is.
 
 ## Release and asset naming
 
-Each release contains one ZIP per PostgreSQL major. The GitHub release **tag**
-identifies the PostgreSQL compatibility-major release stream
-(`<version>-pg<major>-w<revision>`), and the release title follows
-`<version> for PostgreSQL <major> (W<revision>)`. The asset **filename** uses
-the same release identity:
+Each GitHub release contains one ZIP per supported PostgreSQL major. The
+release **tag** identifies one unified pglogical/Windows packaging revision
+(`<version>-w<revision>`), and the release title follows
+`<version> for Windows (W<revision>)`. PostgreSQL compatibility remains in each
+asset filename:
+
+```
+GitHub release tag: 2.4.8-w1
+Release title:      2.4.8 for Windows (W1)
+Package asset:      pglogical-2.4.8-pg18-w1-x64.zip
+```
+
+The asset filename format is:
 
 ```
 pglogical-<pglogical-version>-pg<postgres-major>-w<packaging-revision>-x64.zip
 ```
 
-Example: `pglogical-2.4.8-pg18-w1-x64.zip`
-
 | Part | Meaning |
 | --- | --- |
-| `pglogical 2.4.8` | upstream pglogical version |
+| `2.4.8-w1` | unified pglogical version and Windows packaging revision |
 | `PostgreSQL 18` | compatibility major the package targets |
 | `W1` | Windows packaging revision |
 | `PostgreSQL 18.4` / `EDB packaging revision 2` | exact build provenance recorded in `BUILD-INFO.json` |
 | `Windows x64` | platform / architecture |
+
+All PostgreSQL-major ZIPs and one aggregate `SHA256SUMS.txt` are attached to
+the same release. GitHub Latest therefore points to the complete unified
+release rather than to one PostgreSQL-major package.
 
 Each ZIP has an installation-oriented layout:
 

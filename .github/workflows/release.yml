@@ -1,23 +1,23 @@
-# release.yml — builds and publishes Windows x64 packages for one
-# upstream pglogical release, across all supported PostgreSQL majors.
+# release.yml — builds and publishes one Windows x64 release for one
+# upstream pglogical revision across all supported PostgreSQL majors.
 # The resolve job produces ONE validated plan (a matrix of complete plan
 # entries: pglogical version, upstream tag + commit SHA, PostgreSQL
 # major/minor, Windows packaging revision, and the EXACT pinned EDB artifact
-# identity). Builds link against the pinned artifact; the release body
-# records its filename, URL, and the calculated post-download SHA-256.
+# identity). Builds link against the pinned artifact; the single release body
+# records provenance for every package and the calculated post-download
+# SHA-256 values.
 #
 # Pinned-plan mode (preferred, used by upstream-watch): a planJson input is
 # validated entry-by-entry and the pinned EDB URLs are verified available —
 # no discovery happens inside the build, so a newer EDB revision appearing
 # after planning can never replace the pinned artifact.
 # Discovery mode (manual dispatch without planJson): the exact EDB artifact
-# is resolved with the hardened probe (full bounded revision scan, fail
-# closed on ambiguity) and the same entry structure is produced.
+# is resolved with the hardened probe and the same entry structure is produced.
 #
-# All matrix build jobs must succeed before any publish job starts
-# (publish `needs: build`). Publish jobs run per-major in parallel, so a
-# failure during a publish step can leave a partial set of published
-# releases; the report-failure job then opens an issue.
+# All matrix build jobs must succeed before the ONE publish job starts
+# (publish `needs: build`). The publish job downloads every major package,
+# creates one release tag (`<version>-w<revision>`), and attaches all ZIPs plus
+# one combined SHA256SUMS.txt. This keeps GitHub Latest deterministic.
 #
 # Least-privilege permissions: contents: read everywhere except the publish
 # job, which needs contents: write for the release itself.
@@ -72,10 +72,9 @@ on:
     # No repository secrets are used by this workflow; GITHUB_TOKEN is
     # sufficient for release publication, so no secrets are declared here.
 
-# Per-major concurrency lives at job level (matrix context is not
-# available in a top-level concurrency group). Without the pgMajor
-# suffix, all five majors share one group and GitHub cancels queued runs
-# when a new dispatch arrives — exactly one release would ever publish.
+# All package builds for a release share one workflow-level identity. The
+# publish job is deliberately single-instance: a matrix publish would create
+# multiple immutable tags/releases and make Latest nondeterministic.
 
 # No top-level `permissions` key: when this workflow is invoked as a reusable
 # workflow, GitHub resolves permissions from the caller. Job-level permissions
@@ -103,6 +102,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PLAN_JSON: ${{ inputs.planJson }}
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstreamTag }}
+          INPUT_PACKAGING_REVISION: ${{ inputs.packagingRevision }}
+          INPUT_POSTGRES_MAJORS: ${{ inputs.postgresMajors }}
         run: |
           . ./scripts/common.ps1
           $config = Import-VersionConfig
@@ -124,7 +126,7 @@ jobs:
             $commitSha = [string]$entries[0].upstreamCommitSha
             $majors = @($entries | ForEach-Object { [string]$_.postgresqlMajor } | Sort-Object { [int]$_ })
             Write-Host "Pinned plan validated: $($entries.Count) entries (PostgreSQL $($majors -join ', '))"
-            $planEntriesJson = @($entries) | ConvertTo-Json -Compress -Depth 6
+            $planEntriesJson = @($entries) | ConvertTo-Json -Compress -Depth 6 -AsArray
             "version=$version" >> $env:GITHUB_OUTPUT
             "commitSha=$commitSha" >> $env:GITHUB_OUTPUT
             "upstreamTag=$tag" >> $env:GITHUB_OUTPUT
@@ -138,7 +140,7 @@ jobs:
             # feasible majors, and the exact EDB artifact for every major
             # using the hardened probe. Produces the same plan-entry shape.
             # -----------------------------------------------------------------
-            $tag = '${{ inputs.upstreamTag }}'
+            $tag = $env:INPUT_UPSTREAM_TAG
             if (-not $tag) { $tag = ConvertFrom-PgLogicalVersion -Version $config.releaseBaseline }
             $pattern = [regex](Get-UpstreamTagPattern)
             if (-not $pattern.IsMatch($tag)) {
@@ -169,8 +171,8 @@ jobs:
             } | Sort-Object { [int]$_ })
             $configured = @($config.postgresqlMajors | ForEach-Object { [string]$_ })
             $requested = @()
-            if ('${{ inputs.postgresMajors }}') {
-              $requested = @('${{ inputs.postgresMajors }}'.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if ($env:INPUT_POSTGRES_MAJORS) {
+              $requested = @($env:INPUT_POSTGRES_MAJORS.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
             }
             $configuredFeasible = @($configured | Where-Object { $compatDirs -contains $_ })
             $skipped = @($configured | Where-Object { $compatDirs -notcontains $_ })
@@ -184,7 +186,7 @@ jobs:
             if ($skipped.Count -gt 0) { Write-Host "Skipped (no upstream compat dir; feasibility only): $($skipped -join ', ')" }
             if ($unknownRequested.Count -gt 0) { Write-Host "Ignored unconfigured requested majors: $($unknownRequested -join ', ')" }
 
-            $revision = [int]'${{ inputs.packagingRevision }}'
+            $revision = [int]$env:INPUT_PACKAGING_REVISION
             if ($revision -lt 1) { $revision = 1 }
 
             $entries = @()
@@ -204,11 +206,11 @@ jobs:
                 edbPackagingRevision     = $artifact.revision
                 edbArtifactFilename      = $artifact.filename
                 edbArtifactUrl           = $artifact.url
-                localTag                 = Get-LocalReleaseTag -Version $version -PackagingRevision $revision -PgMajor $m
+                localTag                 = Get-LocalReleaseTag -Version $version -PackagingRevision $revision
               }
               Write-Host "PG $m exact EDB artifact: $($artifact.filename)"
             }
-            $planEntriesJson = if ($entries.Count -gt 0) { @($entries) | ConvertTo-Json -Compress -Depth 6 } else { '[]' }
+            $planEntriesJson = if ($entries.Count -gt 0) { @($entries) | ConvertTo-Json -Compress -Depth 6 -AsArray } else { '[]' }
             $majorsJson = if ($majors.Count -gt 0) { $majors | ConvertTo-Json -Compress -AsArray } else { '[]' }
             "version=$version" >> $env:GITHUB_OUTPUT
             "commitSha=$commitSha" >> $env:GITHUB_OUTPUT
@@ -247,18 +249,21 @@ jobs:
         id: install
         shell: pwsh
         env:
+          PG_MAJOR: ${{ matrix.entry.postgresqlMajor }}
           EDB_MINOR: ${{ matrix.entry.postgresqlMinor }}
           EDB_URL: ${{ matrix.entry.edbArtifactUrl }}
         run: |
-          $pgRoot = & ./scripts/Install-PostgreSql.ps1 -Major ${{ matrix.entry.postgresqlMajor }} -Minor $env:EDB_MINOR -BinariesUrl $env:EDB_URL
+          $pgRoot = & ./scripts/Install-PostgreSql.ps1 -Major $env:PG_MAJOR -Minor $env:EDB_MINOR -BinariesUrl $env:EDB_URL
           "pgRoot=$pgRoot" >> $env:GITHUB_OUTPUT
 
       - name: Clone upstream tag
         shell: pwsh
+        env:
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.upstreamTag }}
         run: |
           . ./scripts/common.ps1
           $repo = Get-UpstreamRepository
-          $tag = '${{ needs.resolve.outputs.upstreamTag }}'
+          $tag = $env:UPSTREAM_TAG
           $src = ".build/$tag/upstream"
           if (-not (Test-Path $src)) {
             New-Item -ItemType Directory -Force -Path ".build/$tag" | Out-Null
@@ -270,12 +275,16 @@ jobs:
         id: build
         shell: pwsh
         timeout-minutes: 30
+        env:
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.upstreamTag }}
+          COMMIT_SHA: ${{ needs.resolve.outputs.commitSha }}
+          PG_ROOT: ${{ steps.install.outputs.pgRoot }}
         run: |
-          $src = ".build/${{ needs.resolve.outputs.upstreamTag }}/upstream"
+          $src = ".build/$env:UPSTREAM_TAG/upstream"
           $stage = & ./scripts/Build-PgLogical.ps1 `
-            -PgRoot "${{ steps.install.outputs.pgRoot }}" `
-            -UpstreamTag "${{ needs.resolve.outputs.upstreamTag }}" `
-            -ExpectedCommitSha "${{ needs.resolve.outputs.commitSha }}" `
+            -PgRoot $env:PG_ROOT `
+            -UpstreamTag $env:UPSTREAM_TAG `
+            -ExpectedCommitSha $env:COMMIT_SHA `
             -SourceDir $src `
             -SkipClone `
             -OutputStaging
@@ -290,7 +299,7 @@ jobs:
           & $dumpbin.FullName /imports (Join-Path $stage 'bin\pglogical_create_subscriber.exe') | Out-String | Set-Content -Path (Join-Path $env:RUNNER_TEMP 'subscriber-imports.txt')
           $imports = Get-Content (Join-Path $env:RUNNER_TEMP 'subscriber-imports.txt') -Raw
           Write-Host "Subscriber imports postgres.exe: $($imports -match 'postgres\.exe')"
-          & $dumpbin.FullName /imports "${{ steps.install.outputs.pgRoot }}\bin\postgres.exe" | Out-String | Set-Content -Path (Join-Path $env:RUNNER_TEMP 'postgres-imports.txt')
+          & $dumpbin.FullName /imports "$env:PG_ROOT\bin\postgres.exe" | Out-String | Set-Content -Path (Join-Path $env:RUNNER_TEMP 'postgres-imports.txt')
           $pgImports = Get-Content (Join-Path $env:RUNNER_TEMP 'postgres-imports.txt') -Raw
           Write-Host "postgres.exe imports pglogical.dll: $($pgImports -match 'pglogical\.dll')"
           & $dumpbin.FullName /exports (Join-Path $stage 'lib\pglogical.dll') | Out-String | Set-Content -Path (Join-Path $env:RUNNER_TEMP 'pgl-exports.txt')
@@ -311,9 +320,11 @@ jobs:
       - name: Smoke test
         shell: pwsh
         timeout-minutes: 30
+        env:
+          PG_ROOT: ${{ steps.install.outputs.pgRoot }}
         run: |
           ./scripts/Test-PgLogical.ps1 `
-            -PgRoot "${{ steps.install.outputs.pgRoot }}" `
+            -PgRoot "$env:PG_ROOT" `
             -StagingDir "${{ steps.build.outputs.stage }}" `
             -UpstreamVersion "${{ needs.resolve.outputs.version }}" `
             -AllowTemporaryLocalUser
@@ -360,7 +371,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish release (PostgreSQL ${{ matrix.entry.postgresqlMajor }})
+    name: Publish unified release
     needs: [resolve, build]
     if: ${{ !inputs.dryRun && needs.resolve.outputs.planEntriesJson != '[]' }}
     runs-on: ubuntu-24.04
@@ -369,131 +380,105 @@ jobs:
       id-token: write
       attestations: write
     concurrency:
-      group: release-${{ github.workflow }}-${{ github.ref }}-pg${{ matrix.entry.postgresqlMajor }}
+      # There is deliberately no matrix here. One publisher owns the immutable
+      # tag/release and receives every PostgreSQL-major package artifact.
+      group: release-${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: false
-    strategy:
-      fail-fast: false
-      matrix:
-        entry: ${{ fromJson(needs.resolve.outputs.planEntriesJson) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: Compute release tag for this PG major
-        id: tag
-        shell: pwsh
-        run: |
-          . ./scripts/common.ps1
-          $tag = Get-LocalReleaseTag `
-            -Version '${{ needs.resolve.outputs.version }}' `
-            -PackagingRevision ([int]'${{ matrix.entry.windowsPackagingRevision }}') `
-            -PgMajor '${{ matrix.entry.postgresqlMajor }}'
-          "releaseTag=$tag" >> $env:GITHUB_OUTPUT
-          Write-Host "Release tag: $tag"
-
-      - name: Download package artifacts
+      - name: Download all package artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          pattern: packages-pg${{ matrix.entry.postgresqlMajor }}
+          pattern: packages-pg*
           path: artifacts
-          merge-multiple: true
+          # Keep each build artifact in its own directory. Every directory
+          # contains a package ZIP, a per-package checksum, and EDB provenance;
+          # the prepare step combines them deterministically.
+          merge-multiple: false
 
-      - name: Verify package checksum
+      - name: Prepare and verify unified release assets
+        id: prepare
         shell: pwsh
+        env:
+          PLAN_JSON: ${{ needs.resolve.outputs.planEntriesJson }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.upstreamTag }}
+          COMMIT_SHA: ${{ needs.resolve.outputs.commitSha }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          $ErrorActionPreference = 'Stop'
           . ./scripts/common.ps1
-          $zips = @(Get-ChildItem artifacts -Filter '*.zip' -File)
-          if ($zips.Count -ne 1) {
-            throw "Expected exactly 1 package ZIP for PG ${{ matrix.entry.postgresqlMajor }} but found $($zips.Count): $($zips.Name -join ', ')"
-          }
-          $expectedName = (Get-PackageZipName `
-            -PglogicalVersion '${{ needs.resolve.outputs.version }}' `
-            -PostgresqlMajor '${{ matrix.entry.postgresqlMajor }}' `
-            -PackagingRevision ([int]'${{ matrix.entry.windowsPackagingRevision }}'))
-          if ($zips[0].Name -ne $expectedName) {
-            throw "Packaged ZIP name '$($zips[0].Name)' does not match the compatibility-major name '$expectedName'"
-          }
-          $sums = @(Get-ChildItem artifacts -Filter 'SHA256SUMS.txt' -File | ForEach-Object { Get-Content $_.FullName })
-          foreach ($zip in $zips) {
-            $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            $line = $sums | Where-Object { $_ -like "*$($zip.Name)" }
-            if (-not $line) { throw "No checksum line for $($zip.Name)" }
-            if (($line -split '\s+')[0] -ne $actual) { throw "Checksum mismatch for $($zip.Name)" }
-            Write-Host "OK: $($zip.Name) matches SHA256 $actual"
-          }
-          $sums | Set-Content -Path artifacts/SHA256SUMS.txt -Encoding ascii
-          Get-Content artifacts/SHA256SUMS.txt
+          $summaryOutput = @(& ./scripts/Prepare-UnifiedReleaseAssets.ps1 `
+            -PlanJson $env:PLAN_JSON `
+            -ArtifactsRoot 'artifacts' `
+            -OutputDirectory 'release-assets' `
+            -TemplatePath '.github/release-body-template.md' `
+            -Version $env:VERSION `
+            -UpstreamRepository (Get-UpstreamRepository) `
+            -UpstreamTag $env:UPSTREAM_TAG `
+            -CommitSha $env:COMMIT_SHA `
+            -RunUrl $env:RUN_URL)
+          if ($LASTEXITCODE -ne 0) { throw 'Prepare-UnifiedReleaseAssets failed.' }
+          $summary = ($summaryOutput -join "`n") | ConvertFrom-Json
+          "releaseTag=$($summary.releaseTag)" >> $env:GITHUB_OUTPUT
+          "releaseTitle=$($summary.releaseTitle)" >> $env:GITHUB_OUTPUT
+          "assetCount=$($summary.packageCount)" >> $env:GITHUB_OUTPUT
 
       - name: Check for an existing release (fail closed)
         id: existing
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.releaseTag }}
         run: |
           . ./scripts/common.ps1
-          $tag = '${{ steps.tag.outputs.releaseTag }}'
-          $state = Test-ExistingRelease -Tag $tag -Repository $env:GITHUB_REPOSITORY
+          $state = Test-ExistingRelease -Tag $env:RELEASE_TAG -Repository $env:GITHUB_REPOSITORY
           if ($state -eq 'absent') {
-            "exists=false" >> $env:GITHUB_OUTPUT
-            Write-Host "Release $tag does not exist; publication will proceed."
+            'exists=false' >> $env:GITHUB_OUTPUT
+            Write-Host "Release $env:RELEASE_TAG does not exist; publication will proceed."
           } else {
-            "exists=true" >> $env:GITHUB_OUTPUT
-            Write-Host "Release $tag already exists; skipping creation (idempotent no-op)."
+            'exists=true' >> $env:GITHUB_OUTPUT
+            Write-Host "Release $env:RELEASE_TAG already exists; creation will be skipped after asset verification."
           }
 
-      - name: Generate release body
-        id: body
-        if: steps.existing.outputs.exists == 'false'
+      - name: Verify existing unified release assets
+        if: steps.existing.outputs.exists == 'true'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.releaseTag }}
+          PLAN_JSON: ${{ needs.resolve.outputs.planEntriesJson }}
         run: |
-          . ./scripts/common.ps1
-          $upstreamRepo = Get-UpstreamRepository
-          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          $checksums = (Get-Content artifacts/SHA256SUMS.txt) -join "`n"
-          $edbRecord = if (Test-Path artifacts/edb-artifact.txt) { (Get-Content artifacts/edb-artifact.txt -Raw).Trim() } else { '' }
-          if (-not $edbRecord) { throw 'Missing edb-artifact.txt; cannot record EDB artifact provenance in the release body.' }
-          $edbParts = $edbRecord -split '\s+', 2
-          $edbHash = $edbParts[0].Trim()
-          $edbArchive = $edbParts[1].Trim()
-          if (-not $edbHash -or -not $edbArchive) { throw "Malformed edb-artifact.txt: '$edbRecord'" }
+          $ErrorActionPreference = 'Stop'
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release) { throw "Could not read existing release $env:RELEASE_TAG." }
+          $actual = @($release.assets | ForEach-Object { [string]$_.name } | Sort-Object)
+          $entries = @($env:PLAN_JSON | ConvertFrom-Json)
+          $expected = @($entries | ForEach-Object { "pglogical-$($_.pglogicalVersion)-pg$($_.postgresqlMajor)-w$($_.windowsPackagingRevision)-x64.zip" }) + 'SHA256SUMS.txt'
+          $expected = @($expected | Sort-Object)
+          if (($actual -join '|') -ne ($expected -join '|')) { throw "Existing release $env:RELEASE_TAG has an incomplete or unexpected asset set. Actual: $($actual -join ', '); expected: $($expected -join ', ')." }
+          Write-Host "Existing release $env:RELEASE_TAG has the complete unified asset set."
 
-          $template = Get-Content .github/release-body-template.md -Raw
-          $body = $template.Replace('{{VERSION}}', '${{ needs.resolve.outputs.version }}')
-          $body = $body.Replace('{{UPSTREAM_REPO}}', $upstreamRepo)
-          $body = $body.Replace('{{UPSTREAM_TAG}}', '${{ needs.resolve.outputs.upstreamTag }}')
-          $body = $body.Replace('{{COMMIT_SHA}}', '${{ needs.resolve.outputs.commitSha }}')
-          $body = $body.Replace('{{PACKAGING_REVISION}}', '${{ matrix.entry.windowsPackagingRevision }}')
-          $body = $body.Replace('{{PG_MAJOR}}', '${{ matrix.entry.postgresqlMajor }}')
-          $body = $body.Replace('{{PG_MINOR}}', '${{ matrix.entry.postgresqlMinor }}')
-          $body = $body.Replace('{{PG_BUILD_VERSION}}', '${{ matrix.entry.postgresqlBuildVersion }}')
-          $body = $body.Replace('{{EDB_REVISION}}', '${{ matrix.entry.edbPackagingRevision }}')
-          $body = $body.Replace('{{EDB_ARCHIVE}}', $edbArchive)
-          $body = $body.Replace('{{EDB_URL}}', '${{ matrix.entry.edbArtifactUrl }}')
-          $body = $body.Replace('{{EDB_BINARIES_SHA256}}', $edbHash)
-          $body = $body.Replace('{{RUN_URL}}', $runUrl)
-          $body = $body.Replace('{{CHECKSUMS}}', $checksums)
-          $body | Set-Content -Path release-body.md -Encoding utf8
-          "bodyFile=$env:GITHUB_WORKSPACE/release-body.md" >> $env:GITHUB_OUTPUT
-
-      - name: Create release
+      - name: Create unified release with all package assets
         if: steps.existing.outputs.exists == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.releaseTag }}
+          RELEASE_TITLE: ${{ steps.prepare.outputs.releaseTitle }}
         run: |
-          releaseTag='${{ steps.tag.outputs.releaseTag }}'
-          # No --draft: GitHub's immutable-release model rejects asset uploads
-          # to drafts (uploads.github.com returns 404) and burned tag names
-          # cannot be reused. Create the release directly WITH its assets in
-          # one call: once an immutable release is published its assets are
-          # locked, so a separate upload step would fail. The
-          # ownership-checked cleanup step still removes an incomplete
-          # release on failure.
-          gh release create "$releaseTag" --repo "$GITHUB_REPOSITORY" \
+          set -euo pipefail
+          # Create the published release WITH every ZIP and the combined
+          # checksum in one call. This is required by the repository's
+          # immutable-release policy and guarantees one tag -> one release.
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "${{ needs.resolve.outputs.version }} for PostgreSQL ${{ matrix.entry.postgresqlMajor }} (W${{ matrix.entry.windowsPackagingRevision }})" \
-            --notes-file release-body.md \
-            artifacts/*.zip artifacts/SHA256SUMS.txt
+            --title "$RELEASE_TITLE" \
+            --draft \
+            --notes-file release-assets/release-body.md \
+            release-assets/*.zip release-assets/SHA256SUMS.txt
 
       - name: Capture created release identity
         if: steps.existing.outputs.exists == 'false'
@@ -501,50 +486,62 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.releaseTag }}
         run: |
-          $tag = '${{ steps.tag.outputs.releaseTag }}'
-          # Published releases have their git tag, so "get release by tag"
-          # works (unlike drafts). Parse in PowerShell (jq filters with quoted
-          # strings get mangled by pwsh native-argument quoting on Windows).
-          # Retry: a just-created release may not be visible immediately.
+          $ErrorActionPreference = 'Stop'
           $release = $null
           for ($attempt = 0; $attempt -lt 5 -and -not $release; $attempt++) {
-            $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>$null | ConvertFrom-Json
+            $raw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" 2>$null
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0 -and $raw) { $release = $raw | ConvertFrom-Json }
             if (-not $release) { Start-Sleep -Seconds 2 }
           }
-          if ($LASTEXITCODE -ne 0 -or -not $release -or -not $release.id) { throw "Could not resolve the release ID for $tag after release creation." }
-          "created=true" >> $env:GITHUB_OUTPUT
+          if (-not $release -or -not $release.id) { throw "Could not resolve the release ID for $env:RELEASE_TAG after release creation." }
+          'created=true' >> $env:GITHUB_OUTPUT
           "releaseId=$($release.id)" >> $env:GITHUB_OUTPUT
-          Write-Host "Captured created release identity: $tag (id $($release.id))"
+          Write-Host "Captured created release identity: $env:RELEASE_TAG (id $($release.id))"
 
-      - name: Verify release assets
+      - name: Verify unified release assets
         if: steps.existing.outputs.exists == 'false'
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
+          RELEASE_ID: ${{ steps.created.outputs.releaseId }}
+          PLAN_JSON: ${{ needs.resolve.outputs.planEntriesJson }}
         run: |
-          releaseId="${{ steps.created.outputs.releaseId }}"
-          names=$(gh api "repos/$GITHUB_REPOSITORY/releases/$releaseId/assets" --jq '.[].name' | sort)
-          echo "assets: $names"
-          echo "$names" | grep -qE '\.zip$' || { echo "No ZIP asset on release"; exit 1; }
-          echo "$names" | grep -q 'SHA256SUMS.txt' || { echo "Missing SHA256SUMS.txt asset"; exit 1; }
+          $ErrorActionPreference = 'Stop'
+          $actual = @(gh api "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID" | ConvertFrom-Json).assets | ForEach-Object { [string]$_.name } | Sort-Object
+          $entries = @($env:PLAN_JSON | ConvertFrom-Json)
+          $expected = @($entries | ForEach-Object { "pglogical-$($_.pglogicalVersion)-pg$($_.postgresqlMajor)-w$($_.windowsPackagingRevision)-x64.zip" }) + 'SHA256SUMS.txt'
+          $expected = @($expected | Sort-Object)
+          if (($actual -join '|') -ne ($expected -join '|')) { throw "Created unified release has an unexpected asset set. Actual: $($actual -join ', '); expected: $($expected -join ', ')." }
+          Write-Host "Verified $($entries.Count) ZIP assets and one combined SHA256SUMS.txt."
 
       - name: Generate artifact attestation
         if: steps.existing.outputs.exists == 'false'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
-          subject-path: artifacts/*.zip
+          subject-path: release-assets/*.zip
+
+      - name: Publish verified unified release
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.releaseTag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
 
       - name: Verify release is published
         if: steps.existing.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.created.outputs.releaseId }}
         shell: bash
         run: |
-          releaseId="${{ steps.created.outputs.releaseId }}"
-          # The release was created directly (no draft); verify it is
-          # published and tag-based lookup works.
-          isDraft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$releaseId" --jq '.draft')
+          set -euo pipefail
+          isDraft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.draft')
           echo "isDraft=$isDraft"
           if [ "$isDraft" != "false" ]; then echo "Release is still a draft"; exit 1; fi
 
@@ -553,28 +550,24 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.releaseTag }}
+          RELEASE_ID: ${{ steps.created.outputs.releaseId }}
         run: |
           . ./scripts/common.ps1
-          $tag = '${{ steps.tag.outputs.releaseTag }}'
-          $releaseId = '${{ steps.created.outputs.releaseId }}'
-          if (-not (Test-ReleaseOwnership -Created '${{ steps.created.outputs.created }}' -ReleaseId $releaseId -Tag $tag -Repository $env:GITHUB_REPOSITORY)) {
-            Write-Host "Cleanup ownership cannot be proven for $tag (releaseId '$releaseId'); leaving the release and tag untouched."
+          if (-not (Test-ReleaseOwnership -Created '${{ steps.created.outputs.created }}' -ReleaseId $env:RELEASE_ID -Tag $env:RELEASE_TAG -Repository $env:GITHUB_REPOSITORY)) {
+            Write-Host "Cleanup ownership cannot be proven for $env:RELEASE_TAG (releaseId '$env:RELEASE_ID'); leaving the release and tag untouched."
             exit 1
           }
-          gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/releases/$releaseId"
-          if ($LASTEXITCODE -ne 0) { throw "Failed to delete incomplete release $tag (id $releaseId)." }
-          # Remove the tag only for the incomplete release created by this
-          # job (ownership verified above). A missing ref is fine.
-          $refDelete = & gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag" 2>&1
+          gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to delete incomplete release $env:RELEASE_TAG (id $env:RELEASE_ID)." }
+          $refDelete = & gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$env:RELEASE_TAG" 2>&1
           if ($LASTEXITCODE -ne 0) { Write-Host "Tag ref cleanup skipped (exit $LASTEXITCODE): $refDelete" }
-          Write-Host "Deleted incomplete release $tag (id $releaseId) created by this job."
+          Write-Host "Deleted incomplete release $env:RELEASE_TAG (id $env:RELEASE_ID) created by this job."
 
   set-latest:
-    # GitHub allows exactly ONE "Latest" release per repository. Parallel
-    # matrix publishes make the winner nondeterministic (last finisher), so
-    # after the whole batch succeeds, deterministically select Latest from
-    # ALL published releases for this pglogical version (not only this run's
-    # change set) and mark it.
+    # GitHub allows exactly ONE "Latest" release per repository. The single
+    # publisher creates one complete unified release, then this job selects
+    # that release deterministically and verifies GitHub's latest read-back.
     name: Mark deterministic GitHub Latest
     needs: [resolve, publish]
     if: ${{ !inputs.dryRun && needs.resolve.outputs.planEntriesJson != '[]' }}
@@ -591,17 +584,22 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           . ./scripts/common.ps1
           $config = Import-VersionConfig
           $majors = @($config.postgresqlMajors | ForEach-Object { [string]$_ })
-          # gh api --jq emits one JSON document per release; ConvertFrom-Json
-          # turns the stream into release objects before selection.
-          $releases = @(gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate --jq '.[] | {tag_name, draft, prerelease}' | ConvertFrom-Json)
+          # Include assets: only a complete unified release may become Latest.
+          $releases = @(gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate --jq '.[] | {tag_name, draft, prerelease, assets}' | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list GitHub releases for Latest selection.' }
           $tag = Select-LatestRelease -Version $env:VERSION -Majors $majors -Releases $releases
-          if (-not $tag) { throw "No published release found for pglogical $env:VERSION; cannot select Latest." }
+          if (-not $tag) { throw "No complete published unified release found for pglogical $env:VERSION; cannot select Latest." }
           $releaseId = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" --jq '.id'
-          gh api -X PATCH "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" -f make_latest=true
-          Write-Host "Marked $tag as the latest release"
+          if ($LASTEXITCODE -ne 0 -or -not $releaseId) { throw "Could not resolve release ID for $tag." }
+          gh api -X PATCH "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" -f make_latest=true | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Could not mark $tag as GitHub Latest." }
+          $latestTag = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" --jq '.tag_name'
+          if ($LASTEXITCODE -ne 0 -or $latestTag -ne $tag) { throw "GitHub Latest read-back returned '$latestTag', expected '$tag'." }
+          Write-Host "Marked and verified $tag as the latest release"
 
   report-failure:
     name: Report build failure
