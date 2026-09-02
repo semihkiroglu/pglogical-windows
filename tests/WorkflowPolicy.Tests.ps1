@@ -40,4 +40,9 @@ Test-Case 'Release workflow accepts the targeted rebuild marker' {
     Assert-True ($release -match 'rebuildMarker:')
 }
 
+Test-Case 'Release failure reporter uses PowerShell environment variable syntax' {
+    Assert-True ($release.Contains('gh issue create --repo "$env:GITHUB_REPOSITORY"'))
+    Assert-False ($release.Contains('gh issue create --repo "$GITHUB_REPOSITORY"'))
+}
+
 Complete-Tests

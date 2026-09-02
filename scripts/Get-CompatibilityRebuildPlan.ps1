@@ -73,7 +73,7 @@ try {
         foreach ($propertyName in @('display_title', 'name', 'run_name')) {
             $property = $run.PSObject.Properties[$propertyName]
             if ($null -eq $property) { continue }
-            foreach ($match in [regex]::Matches([string]$property.Value, 'pglogical-[0-9]+\.[0-9]+\.[0-9]+-pg[0-9]+-windows\.[0-9]+')) {
+            foreach ($match in [regex]::Matches([string]$property.Value, '[0-9]+\.[0-9]+\.[0-9]+-pg[0-9]+-w[0-9]+')) {
                 $null = $inFlightTags.Add($match.Value)
             }
         }

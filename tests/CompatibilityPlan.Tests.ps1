@@ -177,4 +177,10 @@ Test-Case 'Compatibility failure marker is deterministic' {
     Assert-Equal '<!-- pglogical-compatibility-failure: pg18/2.4.8-pg18-w1/postgresql-18.6-2-windows-x64-binaries.zip -->' (Get-CompatibilityFailureMarker -Major '18' -PackageTag '2.4.8-pg18-w1' -ServerArtifactFilename 'postgresql-18.6-2-windows-x64-binaries.zip')
 }
 
+Test-Case 'In-flight rebuild detection uses the current local release tag format' {
+    $rebuildScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\Get-CompatibilityRebuildPlan.ps1') -Raw
+    Assert-True ($rebuildScript.Contains('[0-9]+\.[0-9]+\.[0-9]+-pg[0-9]+-w[0-9]+'))
+    Assert-False ($rebuildScript.Contains('-windows\.[0-9]+'))
+}
+
 Complete-Tests
