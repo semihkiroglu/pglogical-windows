@@ -1,12 +1,13 @@
 <#
 .SYNOPSIS
-    Converts compatibility-smoke results into targeted rebuild decisions.
+    Converts compatibility-smoke results into unified next-revision rebuild decisions.
 
 .DESCRIPTION
     This is a decision-only wrapper. It downloads no package and dispatches no
     workflow. It reads the smoke result JSON files, fetches current release and
-    issue/run state, and emits pinned next-revision plans plus deduplicated
-    same-artifact issue candidates.
+    issue/run state, and emits one complete pinned next-revision plan (all
+    configured PostgreSQL package assets) plus deduplicated same-artifact issue
+    candidates.
 #>
 [CmdletBinding()]
 param(
@@ -45,20 +46,22 @@ try {
     $localReleases = @(Invoke-GitHubApi -Url "https://api.github.com/repos/$Repository/releases")
     $existingTags = @($localReleases | ForEach-Object { [string]$_.tag_name } | Where-Object { $_ })
     $artifacts = @{}
-    foreach ($result in @($results)) {
-        if (-not $result.PSObject.Properties['postgresqlMajor']) { continue }
-        $major = [string]$result.postgresqlMajor
-        if (-not $result.serverEdbArtifactFilename -or -not $result.serverEdbArtifactUrl) { continue }
-        $parsed = ConvertFrom-EdbArtifactFilename -Filename ([string]$result.serverEdbArtifactFilename)
-        if (-not $parsed -or $parsed.major -ne $major) { throw "Smoke result for PostgreSQL $major contains an invalid current artifact identity." }
+    $configuredMajors = @($plan.postgresqlMajors | ForEach-Object { [string]$_ } | Sort-Object { [int]$_ } -Unique)
+    foreach ($planEntry in @($plan.entries)) {
+        if (-not $planEntry.PSObject.Properties['postgresqlMajor']) { continue }
+        $major = [string]$planEntry.postgresqlMajor
+        if ($configuredMajors -notcontains $major) { continue }
+        if (-not $planEntry.serverEdbArtifactFilename -or -not $planEntry.serverEdbArtifactUrl) { continue }
+        $parsed = ConvertFrom-EdbArtifactFilename -Filename ([string]$planEntry.serverEdbArtifactFilename)
+        if (-not $parsed -or $parsed.major -ne $major) { throw "Compatibility plan for PostgreSQL $major contains an invalid current artifact identity." }
         $candidate = [pscustomobject]@{
             major = $major
-            minor = [string]$result.serverMinor
+            minor = [string]$planEntry.serverMinor
             revision = [int]$parsed.revision
-            filename = [string]$result.serverEdbArtifactFilename
-            url = [string]$result.serverEdbArtifactUrl
+            filename = [string]$planEntry.serverEdbArtifactFilename
+            url = [string]$planEntry.serverEdbArtifactUrl
         }
-        if ($artifacts.ContainsKey($major) -and [string]$artifacts[$major].filename -ne $candidate.filename) { throw "Smoke results disagree about the current artifact for PostgreSQL $major." }
+        if ($artifacts.ContainsKey($major) -and [string]$artifacts[$major].filename -ne $candidate.filename) { throw "Compatibility plan entries disagree about the current artifact for PostgreSQL $major." }
         $artifacts[$major] = $candidate
     }
 
@@ -73,13 +76,13 @@ try {
         foreach ($propertyName in @('display_title', 'name', 'run_name')) {
             $property = $run.PSObject.Properties[$propertyName]
             if ($null -eq $property) { continue }
-            foreach ($match in [regex]::Matches([string]$property.Value, '[0-9]+\.[0-9]+\.[0-9]+-pg[0-9]+-w[0-9]+')) {
+            foreach ($match in [regex]::Matches([string]$property.Value, '[0-9]+\.[0-9]+\.[0-9]+(?:-pg[0-9]+)?-w[0-9]+')) {
                 $null = $inFlightTags.Add($match.Value)
             }
         }
     }
 
-    $targeted = @(Get-TargetedRebuildPlan -Version ([string]$plan.pglogicalVersion) -UpstreamTag ([string]$plan.upstreamTag) -CommitSha ([string]$plan.upstreamCommitSha) -FailedMajors $failedMajors -Artifacts $artifacts -LocalReleases $localReleases -CompatibilityResults @($results) -ExistingReleaseTags $existingTags -InFlightTags @($inFlightTags))
+    $targeted = @(Get-TargetedRebuildPlan -Version ([string]$plan.pglogicalVersion) -UpstreamTag ([string]$plan.upstreamTag) -CommitSha ([string]$plan.upstreamCommitSha) -Majors $configuredMajors -FailedMajors $failedMajors -Artifacts $artifacts -LocalReleases $localReleases -CompatibilityResults @($results) -ExistingReleaseTags $existingTags -InFlightTags @($inFlightTags))
 
     $issues = @(Invoke-GitHubApi -Url "https://api.github.com/repos/$Repository/issues?state=all")
     $issueCandidates = [System.Collections.Generic.List[object]]::new()

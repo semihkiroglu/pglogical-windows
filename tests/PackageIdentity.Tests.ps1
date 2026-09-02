@@ -12,11 +12,19 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'test-helpers.ps1')
 . (Join-Path $PSScriptRoot '..\scripts\common.ps1')
 
-Test-Case 'Release identity helpers produce the requested title, tag, and package names' {
-    Assert-Equal '2.4.8 for PostgreSQL 18 (W1)' (Get-ReleaseTitle -Version '2.4.8' -PgMajor '18' -PackagingRevision 1)
-    Assert-Equal '2.4.8-pg18-w1' (Get-LocalReleaseTag -Version '2.4.8' -PgMajor '18' -PackagingRevision 1)
+Test-Case 'Release identity helpers produce one Windows release identity and major-specific package names' {
+    Assert-Equal '2.4.8 for Windows (W1)' (Get-ReleaseTitle -Version '2.4.8' -PackagingRevision 1)
+    Assert-Equal '2.4.8-w1' (Get-LocalReleaseTag -Version '2.4.8' -PackagingRevision 1)
     $name = Get-PackageZipName -PglogicalVersion '2.4.8' -PostgresqlMajor '18' -PackagingRevision 1
     Assert-Equal 'pglogical-2.4.8-pg18-w1-x64.zip' $name
+}
+
+Test-Case 'Local release tag parser accepts the unified Windows tag' {
+    $identity = ConvertFrom-LocalReleaseTag -Tag '2.4.8-w3'
+    Assert-Equal '2.4.8' $identity.pglogicalVersion
+    Assert-Equal 3 $identity.windowsPackagingRevision
+    Assert-True (-not $identity.isLegacy)
+    Assert-Equal '' ([string]$identity.postgresqlMajor)
 }
 
 Test-Case 'New-BuildInfo emits deterministic, complete JSON' {

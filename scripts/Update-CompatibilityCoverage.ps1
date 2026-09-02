@@ -36,8 +36,12 @@ function ConvertTo-CoverageEntry {
     $major = [string]$Result.postgresqlMajor
     if ($major -notmatch '^\d+$') { throw "Passed compatibility result '$ResultPath' has invalid PostgreSQL major '$major'; refusing to persist coverage." }
     $tagIdentity = ConvertFrom-LocalReleaseTag -Tag ([string]$Result.localReleaseTag)
-    if (-not $tagIdentity -or $tagIdentity.postgresqlMajor -ne $major) {
+    if (-not $tagIdentity -or ($tagIdentity.isLegacy -and $tagIdentity.postgresqlMajor -ne $major)) {
         throw "Passed compatibility result '$ResultPath' has an invalid release identity for PostgreSQL $major; refusing to persist coverage."
+    }
+    $packageIdentity = ConvertFrom-PackageZipName -Filename ([string]$Result.localPackageAssetName)
+    if (-not $packageIdentity -or $packageIdentity.pglogicalVersion -ne $tagIdentity.pglogicalVersion -or $packageIdentity.postgresqlMajor -ne $major -or $packageIdentity.windowsPackagingRevision -ne $tagIdentity.windowsPackagingRevision) {
+        throw "Passed compatibility result '$ResultPath' package asset '$($Result.localPackageAssetName)' has an invalid identity for release tag '$($tagIdentity.tag_name)'; refusing to persist coverage."
     }
     $expectedAsset = Get-PackageZipName -PglogicalVersion $tagIdentity.pglogicalVersion -PostgresqlMajor $major -PackagingRevision ([int]$tagIdentity.windowsPackagingRevision)
     if ([string]$Result.localPackageAssetName -ne $expectedAsset) {

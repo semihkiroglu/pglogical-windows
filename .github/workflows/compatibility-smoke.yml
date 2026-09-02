@@ -202,7 +202,7 @@ jobs:
           if (@($results | Where-Object { $_.status -ne 'passed' }).Count -gt 0) { exit 1 }
 
   decide:
-    name: Decide targeted rebuild or issue
+    name: Decide unified rebuild or issue
     needs: [discover, smoke]
     if: ${{ always() && needs.discover.result == 'success' }}
     runs-on: ubuntu-24.04
@@ -327,14 +327,15 @@ jobs:
 
           $targeted = @($decision.targetedRebuildPlan)
           if ($targeted.Count -eq 0) {
-            Write-Host 'No targeted rebuild dispatch required.'
+            Write-Host 'No unified rebuild dispatch required.'
             exit 0
           }
           $targetedJson = $targeted | ConvertTo-Json -Depth 10 -Compress -AsArray
           $validated = @(Test-ReleasePlan -PlanJson $targetedJson)
           if ($validated.Count -ne $targeted.Count) { throw 'Targeted rebuild plan validation count mismatch; refusing dispatch.' }
-          $targetTags = @($targeted | ForEach-Object { [string]$_.localTag })
-          $marker = "compatibility-rebuild/$($targetTags -join ',')"
+          $targetTags = @($targeted | ForEach-Object { [string]$_.localTag } | Sort-Object -Unique)
+          if ($targetTags.Count -ne 1) { throw 'Unified rebuild plan contains multiple release tags; refusing dispatch.' }
+          $marker = "compatibility-rebuild/$($targetTags[0])"
           $dispatchPayload = @{
             ref = 'main'
             inputs = @{

@@ -30,7 +30,7 @@ try {
         throw "Release '$ReleaseTag' is draft or prerelease; compatibility tests require a published stable release."
     }
 
-    $selectedAssets = Get-ReleasePackageAssets -Assets @($release.assets)
+    $selectedAssets = Get-ReleasePackageAssets -Assets @($release.assets) -PackageAssetName $PackageAssetName
     $selectedPackageName = [string]$selectedAssets.Package.name
     if ($PackageAssetName -and $PackageAssetName -ne $selectedPackageName) {
         throw "Requested package asset '$PackageAssetName' is not the release's selected package asset '$selectedPackageName'."

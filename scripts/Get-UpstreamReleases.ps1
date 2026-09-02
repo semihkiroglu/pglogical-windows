@@ -1,21 +1,29 @@
-<#
+﻿<#
 .SYNOPSIS
-    Discovers the latest upstream pglogical release and plans only missing
-    local packages for upstream-compatible configured PostgreSQL majors.
+    Discovers the latest upstream pglogical release and plans one complete
+    unified release containing all upstream-compatible configured PostgreSQL
+    major assets.
 
 .DESCRIPTION
-    The normal path is upstream-release driven. A published local release for
-    the same pglogical version and PostgreSQL major is coverage, regardless of
-    current PostgreSQL minor or EDB packaging revision. Current EDB identity is
-    resolved only for missing majors. Compatibility smoke is a separate
-    workflow and is the only path that can request a targeted wN+1
-    rebuild.
+    The normal path is upstream-release driven. A complete published local
+    release is coverage only when its unified tag exposes the exact package
+    asset for every configured major; legacy per-major releases remain readable
+    during migration. Once any major is missing, exact EDB identity is resolved
+    for every configured major so the immutable unified release is never
+    partial. Compatibility smoke is a separate workflow and is the path that
+    requests later Windows packaging revisions.
+
+.PARAMETER ForceUnified
+    Explicitly ignores complete legacy per-major coverage and emits one full
+    unified plan. Intended only for one-time migration of historical releases;
+    normal upstream-watch execution must leave this switch unset.
 #>
 [CmdletBinding()]
 param(
     [string]$OutputFile,
     [string]$Baseline,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$ForceUnified
 )
 
 Set-StrictMode -Version Latest
@@ -86,7 +94,10 @@ try {
     }
     catch {
         $statusCode = $null
-        if ($null -ne $_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode }
+        $responseProperty = $_.Exception.PSObject.Properties['Response']
+        if ($null -ne $responseProperty -and $null -ne $responseProperty.Value -and $null -ne $responseProperty.Value.StatusCode) {
+            $statusCode = [int]$responseProperty.Value.StatusCode
+        }
         if ($statusCode -eq 404) {
             $empty = New-EmptyPlan -Reason 'no published upstream release'
             Write-PlanFile -Value $empty
@@ -123,14 +134,15 @@ try {
     Write-Host "Configured compatible PostgreSQL majors: $($majors -join ', ')"
 
     # -----------------------------------------------------------------------
-    # 3. Coverage first. Current EDB identity is irrelevant for covered
-    #    majors, so resolve it only after this list is known.
+    # 3. Coverage first. A published package asset covers a version × major;
+    #    if any major is missing, the unified release must contain every
+    #    configured major and therefore needs every exact EDB identity.
     # -----------------------------------------------------------------------
     $allReleases = @(Invoke-GitHubApi -Url "https://api.github.com/repos/$localOwner/releases")
-    $localReleases = @($allReleases | Where-Object { Test-PublishedRelease -Release $_ })
-    Write-Host "Fetched $($localReleases.Count) published local releases"
-    $missingMajors = @(Get-MissingReleaseMajors -Version $version -Majors $majors -LocalReleases $localReleases)
-    if ($missingMajors.Count -eq 0) {
+    $publishedReleases = @($allReleases | Where-Object { Test-PublishedRelease -Release $_ })
+    Write-Host "Fetched $($publishedReleases.Count) published local releases ($($allReleases.Count) total)"
+    $missingMajors = @(Get-MissingReleaseMajors -Version $version -Majors $majors -LocalReleases $allReleases)
+    if ($missingMajors.Count -eq 0 -and -not $ForceUnified) {
         $empty = New-EmptyPlan -UpstreamTag $tag -CommitSha $commitSha -Majors $majors -Reason 'all compatible majors are already covered'
         Write-PlanFile -Value $empty
         Write-Host 'Build plan is empty: all compatible configured majors are covered.'
@@ -138,19 +150,19 @@ try {
     }
 
     # -----------------------------------------------------------------------
-    # 4. Resolve exact EDB identity only for missing majors and create w1
-    #    entries. Minor/revision drift for existing releases never reaches here.
+    # 4. Resolve exact EDB identity for every configured compatible major and
+    #    create one shared-tag entry per package asset.
     # -----------------------------------------------------------------------
     $artifacts = [ordered]@{}
-    foreach ($major in $missingMajors) {
+    foreach ($major in $majors) {
         $pgEntry = Get-PgOrgEntry -Major $major
         $artifact = Resolve-EdbArtifact -Major $major -Minor ([string]$pgEntry.latestMinor)
-        if (-not $artifact) { throw "Cannot resolve the exact EDB Windows x64 binaries artifact for missing PostgreSQL $major; failing closed." }
+        if (-not $artifact) { throw "Cannot resolve the exact EDB Windows x64 binaries artifact for PostgreSQL $major; failing closed." }
         $artifacts[$major] = $artifact
         Write-Host "PG $major exact EDB artifact: $($artifact.filename)"
     }
 
-    $plan = @(Get-ReleasePlan -Version $version -UpstreamTag $tag -CommitSha $commitSha -Majors $majors -Artifacts $artifacts -LocalReleases $localReleases)
+    $plan = @(Get-ReleasePlan -Version $version -UpstreamTag $tag -CommitSha $commitSha -Majors $majors -Artifacts $artifacts -LocalReleases $allReleases -ForceUnified:$ForceUnified)
     $plan = @($plan | Sort-Object { [int]$_.postgresqlMajor })
     $result = [pscustomobject]@{
         schemaVersion = 1
@@ -164,11 +176,11 @@ try {
         postgresqlMajors = $majors
         compatibleUpstreamMajors = $compatibleMajors
         plan = $plan
-        reason = 'missing local package coverage'
+        reason = if ($ForceUnified) { 'forced unified migration' } else { 'missing local package coverage' }
     }
     Write-PlanFile -Value $result
     if (-not $Quiet) {
-        Write-Host "Build plan ($($plan.Count) missing release(s)):"
+        Write-Host "Build plan: one unified release ($($plan.Count) package assets):"
         foreach ($entry in $plan) { Write-Host "  $($entry.localTag) [EDB $($entry.edbArtifactFilename)]" }
     }
     Write-Host "Plan written to: $OutputFile"

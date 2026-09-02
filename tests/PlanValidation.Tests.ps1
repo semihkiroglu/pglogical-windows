@@ -1,9 +1,8 @@
 <#
 .SYNOPSIS
-    Unit tests for Test-ReleasePlan: pinned release-plan validation
+    Unit tests for Test-ReleasePlan: pinned unified release-plan validation
     (malformed JSON, required properties, duplicates, URL/host/filename
-    identity, SHA/tag formats, cross-entry consistency) and the pinning
-    helper behaviors.
+    identity, SHA/tag formats, cross-entry consistency) and pinning helpers.
 #>
 [CmdletBinding()]
 param()
@@ -30,11 +29,11 @@ function New-ValidEntry {
         edbPackagingRevision     = $EdbRevision
         edbArtifactFilename      = "postgresql-$Major.$Minor-$EdbRevision-windows-x64-binaries.zip"
         edbArtifactUrl           = "https://get.enterprisedb.com/postgresql/postgresql-$Major.$Minor-$EdbRevision-windows-x64-binaries.zip"
-        localTag                 = "2.4.8-pg$Major-w$WindowsRevision"
+        localTag                 = "2.4.8-w$WindowsRevision"
     }
 }
 
-Test-Case 'Test-ReleasePlan accepts a valid multi-entry plan' {
+Test-Case 'Test-ReleasePlan accepts a valid multi-major unified plan' {
     $plan = @((New-ValidEntry -Major '18' -Minor '4' -EdbRevision 2), (New-ValidEntry -Major '17' -Minor '10' -EdbRevision 1))
     $entries = Test-ReleasePlan -PlanJson ($plan | ConvertTo-Json -Depth 6)
     Assert-Equal 2 @($entries).Count
@@ -65,6 +64,18 @@ Test-Case 'Test-ReleasePlan rejects entries mixing different upstream releases' 
     $e2 = New-ValidEntry -Major '17' -Minor '10' -EdbRevision 1
     $e2['pglogicalVersion'] = '2.4.7'
     Assert-Throws { Test-ReleasePlan -PlanJson (@($e1, $e2) | ConvertTo-Json -Depth 6) } -MessagePattern 'mixes different upstream releases'
+}
+
+Test-Case 'Test-ReleasePlan rejects entries mixing Windows packaging revisions' {
+    $e1 = New-ValidEntry -Major '18' -WindowsRevision 1
+    $e2 = New-ValidEntry -Major '17' -Minor '10' -EdbRevision 1 -WindowsRevision 2
+    Assert-Throws { Test-ReleasePlan -PlanJson (@($e1, $e2) | ConvertTo-Json -Depth 6) } -MessagePattern 'packaging revision'
+}
+
+Test-Case 'Test-ReleasePlan rejects a legacy per-major local tag' {
+    $e = New-ValidEntry
+    $e['localTag'] = '2.4.8-pg18-w1'
+    Assert-Throws { Test-ReleasePlan -PlanJson (@($e) | ConvertTo-Json -Depth 6) } -MessagePattern 'expected release tag'
 }
 
 Test-Case 'Test-ReleasePlan rejects an invalid upstream commit SHA' {

@@ -16,7 +16,7 @@ function Invoke-FakeReleaseGhApi {
         'ok' {
             return @{ ExitCode = 0; Stdout = (@{
                 id = 123
-                tag_name = '2.4.8-pg18-w1'
+                tag_name = '2.4.8-w1'
                 draft = $false
                 prerelease = $false
             } | ConvertTo-Json -Compress); Stderr = '' }
@@ -29,11 +29,11 @@ function Invoke-FakeReleaseGhApi {
 }
 $script:GhApiRunner = 'Invoke-FakeReleaseGhApi'
 
-Test-Case 'GitHub release lookup accepts a published JSON response' {
+Test-Case 'GitHub release lookup accepts a published unified-release JSON response' {
     $script:ApiMode = 'ok'
-    $release = Get-GitHubReleaseByTag -Repository 'o/r' -Tag '2.4.8-pg18-w1'
+    $release = Get-GitHubReleaseByTag -Repository 'o/r' -Tag '2.4.8-w1'
     Assert-Equal 123 $release.id
-    Assert-Equal '2.4.8-pg18-w1' $release.tag_name
+    Assert-Equal '2.4.8-w1' $release.tag_name
 }
 
 Test-Case 'GitHub release lookup treats only HTTP 404 as absent' {
@@ -48,20 +48,21 @@ Test-Case 'GitHub release lookup fails closed for 403, 429, and transport errors
     }
 }
 
-Test-Case 'Release assets require exactly one package ZIP and one checksum file' {
+Test-Case 'Unified releases select one requested package ZIP from many assets' {
     $assets = @(
-        [pscustomobject]@{ name = 'pglogical-2.4.8-pg18-w1-x64.zip'; browser_download_url = 'https://example.invalid/package.zip' },
+        [pscustomobject]@{ name = 'pglogical-2.4.8-pg14-w1-x64.zip'; browser_download_url = 'https://example.invalid/pg14.zip' },
+        [pscustomobject]@{ name = 'pglogical-2.4.8-pg18-w1-x64.zip'; browser_download_url = 'https://example.invalid/pg18.zip' },
         [pscustomobject]@{ name = 'SHA256SUMS.txt'; browser_download_url = 'https://example.invalid/SHA256SUMS.txt' }
     )
-    $selected = Get-ReleasePackageAssets -Assets $assets
+    $selected = Get-ReleasePackageAssets -Assets $assets -PackageAssetName 'pglogical-2.4.8-pg18-w1-x64.zip'
     Assert-Equal 'pglogical-2.4.8-pg18-w1-x64.zip' $selected.Package.name
     Assert-Equal 'SHA256SUMS.txt' $selected.Checksums.name
     Assert-Throws {
-        Get-ReleasePackageAssets -Assets @($assets[0]) | Out-Null
-    } -MessagePattern 'checksum'
-    Assert-Throws {
-        Get-ReleasePackageAssets -Assets @($assets + $assets[0]) | Out-Null
+        Get-ReleasePackageAssets -Assets $assets | Out-Null
     } -MessagePattern 'exactly one package'
+    Assert-Throws {
+        Get-ReleasePackageAssets -Assets $assets -PackageAssetName 'pglogical-2.4.8-pg17-w1-x64.zip' | Out-Null
+    } -MessagePattern 'requested package ZIP asset'
 }
 
 Test-Case 'Checksum parser accepts a matching line and rejects mismatch or ambiguity' {
@@ -105,14 +106,14 @@ try {
         $archive = Expand-ReleasePackageArchive -ZipPath $zipPath -OutputDir $expanded
         Assert-Equal $expanded $archive.StagingDir
         Assert-Equal '2.4.8' $archive.BuildInfo.pglogicalVersion
-        Assert-True (Test-ReleasePackageProvenance -Info $archive.BuildInfo -ReleaseTag '2.4.8-pg18-w1' -PostgresqlMajor '18' -PackageAssetName 'pglogical-2.4.8-pg18-w1-x64.zip')
+        Assert-True (Test-ReleasePackageProvenance -Info $archive.BuildInfo -ReleaseTag '2.4.8-w1' -PostgresqlMajor '18' -PackageAssetName 'pglogical-2.4.8-pg18-w1-x64.zip')
     }
 
     Test-Case 'Provenance rejects a wrong PostgreSQL major and malformed BUILD-INFO' {
         $archive = Expand-ReleasePackageArchive -ZipPath $zipPath -OutputDir (Join-Path $fixtureRoot 'expanded-2')
-        Assert-Throws { Test-ReleasePackageProvenance -Info $archive.BuildInfo -ReleaseTag '2.4.8-pg18-w1' -PostgresqlMajor '17' -PackageAssetName 'pglogical-2.4.8-pg18-w1-x64.zip' } -MessagePattern 'major'
+        Assert-Throws { Test-ReleasePackageProvenance -Info $archive.BuildInfo -ReleaseTag '2.4.8-w1' -PostgresqlMajor '17' -PackageAssetName 'pglogical-2.4.8-pg18-w1-x64.zip' } -MessagePattern 'major'
         $broken = [pscustomobject]@{ pglogicalVersion = '2.4.8' }
-        Assert-Throws { Test-ReleasePackageProvenance -Info $broken -ReleaseTag '2.4.8-pg18-w1' -PostgresqlMajor '18' -PackageAssetName 'package.zip' } -MessagePattern 'missing'
+        Assert-Throws { Test-ReleasePackageProvenance -Info $broken -ReleaseTag '2.4.8-w1' -PostgresqlMajor '18' -PackageAssetName 'package.zip' } -MessagePattern 'missing'
     }
 
     Test-Case 'Archive extraction rejects path traversal' {

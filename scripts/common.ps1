@@ -199,46 +199,71 @@ function ConvertFrom-PgLogicalVersion {
 function Get-LocalReleaseTag {
     <#
     .SYNOPSIS
-        Builds the local release tag, e.g. 2.4.8-pg14-w1.
+        Builds the single local release tag for a pglogical/Windows revision,
+        e.g. 2.4.8-w1. PostgreSQL major is an asset identity, not a release
+        identity.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Version,
-        [Parameter(Mandatory = $true)][int]$PackagingRevision,
-        [Parameter(Mandatory = $true)][string]$PgMajor
+        [Parameter(Mandatory = $true)][int]$PackagingRevision
     )
-    return "$Version-pg$PgMajor-w$PackagingRevision"
+    if ($PackagingRevision -lt 1) { throw "PackagingRevision must be at least 1; got $PackagingRevision." }
+    return "$Version-w$PackagingRevision"
 }
 
 function Get-ReleaseTitle {
     <#
     .SYNOPSIS
-        Builds the public release title, e.g. 2.4.8 for PostgreSQL 14 (W1).
+        Builds the public unified release title, e.g. 2.4.8 for Windows (W1).
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Version,
-        [Parameter(Mandatory = $true)][int]$PackagingRevision,
-        [Parameter(Mandatory = $true)][string]$PgMajor
+        [Parameter(Mandatory = $true)][int]$PackagingRevision
     )
-    return "$Version for PostgreSQL $PgMajor (W$PackagingRevision)"
+    if ($PackagingRevision -lt 1) { throw "PackagingRevision must be at least 1; got $PackagingRevision." }
+    return "$Version for Windows (W$PackagingRevision)"
 }
 
 function ConvertFrom-LocalReleaseTag {
     <#
     .SYNOPSIS
-        Parses a local pglogical release tag into its version, major, and
-        Windows packaging revision components. Returns $null for unrelated or
-        malformed tags.
+        Parses a unified local release tag (N.N.N-wN). Legacy per-major tags
+        (N.N.N-pgN-wN) are also accepted for migration/read-only discovery.
+        Returns $null for unrelated or malformed tags.
     #>
     param([string]$Tag)
     if ([string]::IsNullOrWhiteSpace($Tag)) { return $null }
-    $m = [regex]::Match($Tag.Trim(), '^([0-9]+\.[0-9]+\.[0-9]+)-pg([0-9]+)-w([0-9]+)$')
-    if (-not $m.Success) { return $null }
-    try { $version = [version]$m.Groups[1].Value }
+    $trimmed = $Tag.Trim()
+    $common = [regex]::Match($trimmed, '^([0-9]+\.[0-9]+\.[0-9]+)-w([0-9]+)$')
+    $legacy = [regex]::Match($trimmed, '^([0-9]+\.[0-9]+\.[0-9]+)-pg([0-9]+)-w([0-9]+)$')
+    if (-not $common.Success -and -not $legacy.Success) { return $null }
+    $match = if ($common.Success) { $common } else { $legacy }
+    try { $version = [version]$match.Groups[1].Value }
     catch { return $null }
     return [pscustomobject]@{
-        tag_name = $Tag.Trim()
-        pglogicalVersion = $m.Groups[1].Value
+        tag_name = $trimmed
+        pglogicalVersion = $match.Groups[1].Value
         version = $version
+        postgresqlMajor = if ($legacy.Success) { $match.Groups[2].Value } else { '' }
+        windowsPackagingRevision = [int]$(if ($legacy.Success) { $match.Groups[3].Value } else { $match.Groups[2].Value })
+        isLegacy = [bool]$legacy.Success
+    }
+}
+
+function ConvertFrom-PackageZipName {
+    <#
+    .SYNOPSIS
+        Parses a major-specific package asset name. Returns $null when the
+        filename is not a pglogical compatibility package.
+    #>
+    param([string]$Filename)
+    if ([string]::IsNullOrWhiteSpace($Filename)) { return $null }
+    $m = [regex]::Match($Filename.Trim(), '^pglogical-([0-9]+\.[0-9]+\.[0-9]+)-pg([0-9]+)-w([0-9]+)-x64\.zip$')
+    if (-not $m.Success) { return $null }
+    return [pscustomobject]@{
+        filename = $Filename.Trim()
+        pglogicalVersion = $m.Groups[1].Value
+        version = [version]$m.Groups[1].Value
         postgresqlMajor = $m.Groups[2].Value
         windowsPackagingRevision = [int]$m.Groups[3].Value
     }
@@ -258,13 +283,32 @@ function Test-PublishedRelease {
     return (-not $draft -and -not $prerelease)
 }
 
+function Test-ReleaseContainsPackageForMajor {
+    <#
+    .SYNOPSIS
+        Returns true when a release exposes the exact package asset for a
+        PostgreSQL major implied by its release tag.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Release,
+        [Parameter(Mandatory = $true)][string]$Major
+    )
+    $identity = ConvertFrom-LocalReleaseTag -Tag ([string]$Release.tag_name)
+    if (-not $identity) { return $false }
+    if ($identity.isLegacy -and $identity.postgresqlMajor -ne $Major) { return $false }
+    $assets = if ($null -ne $Release.PSObject.Properties['assets']) { @($Release.assets) } else { @() }
+    $packageName = Get-ReleasePackageAssetName -Assets $assets -PostgresqlMajor $Major
+    if (-not $packageName) { return $false }
+    $expected = Get-PackageZipName -PglogicalVersion $identity.pglogicalVersion -PostgresqlMajor $Major -PackagingRevision $identity.windowsPackagingRevision
+    return $packageName -eq $expected
+}
+
 function Select-LatestReleaseForMajor {
     <#
     .SYNOPSIS
-        Selects the latest published local package release for one PostgreSQL
-        major. Upstream semantic version wins; equal versions use the highest
-        Windows packaging revision. The repository-wide GitHub Latest release
-        is deliberately not consulted.
+        Selects the latest published release containing the requested major's
+        asset. Unified releases can contain many ZIPs; legacy per-major
+        releases remain readable during migration.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Major,
@@ -274,18 +318,22 @@ function Select-LatestReleaseForMajor {
     foreach ($release in @($Releases)) {
         if (-not (Test-PublishedRelease -Release $release)) { continue }
         $identity = ConvertFrom-LocalReleaseTag -Tag ([string]$release.tag_name)
-        if (-not $identity -or $identity.postgresqlMajor -ne $Major) { continue }
+        if (-not $identity -or ($identity.isLegacy -and $identity.postgresqlMajor -ne $Major)) { continue }
+        if (-not (Test-ReleaseContainsPackageForMajor -Release $release -Major $Major)) { continue }
+        $assets = if ($null -ne $release.PSObject.Properties['assets']) { @($release.assets) } else { @() }
+        $packageName = Get-ReleasePackageAssetName -Assets $assets -PostgresqlMajor $Major
         if (-not $best -or $identity.version -gt $best.version -or
             ($identity.version -eq $best.version -and $identity.windowsPackagingRevision -gt $best.windowsPackagingRevision)) {
             $best = [pscustomobject]@{
                 tag_name = $identity.tag_name
                 body = if ($null -ne $release.PSObject.Properties['body']) { [string]$release.body } else { '' }
-                assets = if ($null -ne $release.PSObject.Properties['assets']) { @($release.assets) } else { @() }
+                assets = $assets
                 draft = if ($null -ne $release.PSObject.Properties['draft']) { [bool]$release.draft } else { $false }
                 prerelease = if ($null -ne $release.PSObject.Properties['prerelease']) { [bool]$release.prerelease } else { $false }
                 pglogicalVersion = $identity.pglogicalVersion
-                postgresqlMajor = $identity.postgresqlMajor
+                postgresqlMajor = $Major
                 windowsPackagingRevision = $identity.windowsPackagingRevision
+                packageAssetName = $packageName
                 version = $identity.version
             }
         }
@@ -296,21 +344,58 @@ function Select-LatestReleaseForMajor {
 function Get-MissingReleaseMajors {
     <#
     .SYNOPSIS
-        Returns configured majors without a published local package for the
-        requested upstream pglogical version.
+        Returns configured majors without a published package asset for the
+        requested upstream pglogical version. A unified release contributes
+        coverage only when it contains the correctly named asset for that
+        major; legacy per-major releases remain readable during migration.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Version,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Majors,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$LocalReleases
     )
+    $configured = @($Majors | ForEach-Object { [string]$_ } | Sort-Object { [int]$_ } -Unique)
     $present = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($release in @($LocalReleases)) {
         if (-not (Test-PublishedRelease -Release $release)) { continue }
         $identity = ConvertFrom-LocalReleaseTag -Tag ([string]$release.tag_name)
-        if ($identity -and $identity.pglogicalVersion -eq $Version) { $null = $present.Add($identity.postgresqlMajor) }
+        if (-not $identity -or $identity.pglogicalVersion -ne $Version) { continue }
+        foreach ($major in $configured) {
+            if (Test-ReleaseContainsPackageForMajor -Release $release -Major $major) {
+                $null = $present.Add($major)
+            }
+        }
     }
-    return @($Majors | ForEach-Object { [string]$_ } | Where-Object { -not $present.Contains($_) } | Sort-Object { [int]$_ })
+    return @($configured | Where-Object { -not $present.Contains($_) })
+}
+
+function Get-NextCommonPackagingRevision {
+    <#
+    .SYNOPSIS
+        Returns the next unused unified Windows packaging revision for a
+        pglogical version. Legacy per-major tags do not consume common numbers.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Releases,
+        [AllowEmptyCollection()][string[]]$ExistingReleaseTags = @()
+    )
+    $highest = 0
+    $used = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($tag in @($ExistingReleaseTags)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$tag)) { $null = $used.Add([string]$tag) }
+    }
+    foreach ($release in @($Releases)) {
+        $tag = [string]$release.tag_name
+        if ($tag) { $null = $used.Add($tag) }
+        $identity = ConvertFrom-LocalReleaseTag -Tag $tag
+        if ($identity -and -not $identity.isLegacy -and $identity.pglogicalVersion -eq $Version -and $identity.windowsPackagingRevision -gt $highest) {
+            $highest = $identity.windowsPackagingRevision
+        }
+    }
+    $next = $highest + 1
+    while ($used.Contains((Get-LocalReleaseTag -Version $Version -PackagingRevision $next))) { $next++ }
+    return $next
 }
 
 function Get-UpstreamCompatibilityMajors {
@@ -342,14 +427,25 @@ function Test-UpstreamCompatibilityMajor {
 function Get-ReleasePackageAssetName {
     <#
     .SYNOPSIS
-        Returns the single package ZIP asset name, excluding checksum assets.
-        Ambiguous or missing asset lists return $null.
+        Returns one package ZIP asset name, excluding checksum assets. When a
+        PostgreSQL major is supplied, selects that major's exact package from a
+        unified release containing multiple ZIP assets. Ambiguous or missing
+        asset lists return $null.
     #>
-    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Assets)
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Assets,
+        [string]$PostgresqlMajor = ''
+    )
     $packages = @($Assets | Where-Object {
         $name = if ($null -ne $_.PSObject.Properties['name']) { [string]$_.name } else { '' }
         $name -match '\.zip$' -and $name -notmatch '(?i)(sha256|checksum|sums)'
     } | ForEach-Object { [string]$_.name })
+    if ($PostgresqlMajor) {
+        $packages = @($packages | Where-Object {
+            $identity = ConvertFrom-PackageZipName -Filename $_
+            $identity -and $identity.postgresqlMajor -eq $PostgresqlMajor
+        })
+    }
     if ($packages.Count -ne 1) { return $null }
     return $packages[0]
 }
@@ -401,8 +497,12 @@ function Read-CompatibilityCoverage {
         $major = [string]$entry.postgresqlMajor
         if ($major -notmatch '^\d+$') { throw "Compatibility coverage entry has an invalid PostgreSQL major '$major'; failing closed." }
         $tagIdentity = ConvertFrom-LocalReleaseTag -Tag ([string]$entry.localReleaseTag)
-        if (-not $tagIdentity -or $tagIdentity.postgresqlMajor -ne $major) {
+        if (-not $tagIdentity -or ($tagIdentity.isLegacy -and $tagIdentity.postgresqlMajor -ne $major)) {
             throw "Compatibility coverage entry has an invalid release identity for PostgreSQL $major; failing closed."
+        }
+        $packageAsset = ConvertFrom-PackageZipName -Filename ([string]$entry.localPackageAssetName)
+        if (-not $packageAsset -or $packageAsset.pglogicalVersion -ne $tagIdentity.pglogicalVersion -or $packageAsset.postgresqlMajor -ne $major -or $packageAsset.windowsPackagingRevision -ne $tagIdentity.windowsPackagingRevision) {
+            throw "Compatibility coverage entry has an invalid package asset identity for PostgreSQL $major; failing closed."
         }
         $packageArtifact = ConvertFrom-EdbArtifactFilename -Filename ([string]$entry.localPackageBuildArtifactFilename)
         if (-not $packageArtifact -or $packageArtifact.major -ne $major) {
@@ -480,12 +580,19 @@ function Get-CompatibilitySmokePlan {
             continue
         }
 
-        $localFilename = Get-EdbArtifactFromReleaseBody -Body ([string]$release.body)
-        $packageAssetName = Get-ReleasePackageAssetName -Assets @($release.assets)
+        $localFilename = Get-EdbArtifactFromReleaseBody -Body ([string]$release.body) -PostgresqlMajor $major
+        $packageAssetName = Get-ReleasePackageAssetName -Assets @($release.assets) -PostgresqlMajor $major
         $metadataIssue = $null
-        if (-not $localFilename) { $metadataIssue = "Release $($release.tag_name) records no EDB binaries archive filename." }
-        elseif (-not (ConvertFrom-EdbArtifactFilename -Filename $localFilename)) { $metadataIssue = "Release $($release.tag_name) records an invalid EDB artifact filename '$localFilename'." }
-        if (-not $packageAssetName) { $metadataIssue = "Release $($release.tag_name) does not expose exactly one package ZIP asset." }
+        if (-not $localFilename) {
+            $metadataIssue = "Release $($release.tag_name) records no EDB binaries archive filename for PostgreSQL $major."
+        }
+        else {
+            $parsedLocal = ConvertFrom-EdbArtifactFilename -Filename $localFilename
+            if (-not $parsedLocal -or $parsedLocal.major -ne $major) {
+                $metadataIssue = "Release $($release.tag_name) records an invalid EDB artifact filename '$localFilename' for PostgreSQL $major."
+            }
+        }
+        if (-not $packageAssetName) { $metadataIssue = "Release $($release.tag_name) does not expose exactly one package ZIP asset for PostgreSQL $major." }
         $coverageMatch = @($CoverageEntries | Where-Object {
             Test-CompatibilityCoverageMatch -Entry $_ `
                 -LocalReleaseTag ([string]$release.tag_name) `
@@ -519,15 +626,19 @@ function Get-CompatibilitySmokePlan {
 function Get-TargetedRebuildPlan {
     <#
     .SYNOPSIS
-        Produces pinned next-revision release entries only for failed majors
-        whose older package artifact is incompatible with the current exact
-        server artifact. Environment/download failures and same-artifact
-        failures never produce a rebuild entry.
+        Produces a complete unified next-revision release plan when a failed
+        compatibility smoke result proves that a package's EDB artifact is
+        older than the current exact server artifact. The triggering failure
+        may name one major, but the returned plan contains every configured
+        major so the immutable release is never published with a partial asset
+        set. Environment/download failures and same-artifact failures never
+        produce a rebuild entry.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Version,
         [Parameter(Mandatory = $true)][string]$UpstreamTag,
         [Parameter(Mandatory = $true)][string]$CommitSha,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Majors,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$FailedMajors,
         [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Artifacts,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$LocalReleases,
@@ -535,48 +646,39 @@ function Get-TargetedRebuildPlan {
         [AllowEmptyCollection()][string[]]$ExistingReleaseTags = @(),
         [AllowEmptyCollection()][string[]]$InFlightTags = @()
     )
-    $existingTagSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    foreach ($tag in @($ExistingReleaseTags + $InFlightTags)) { $null = $existingTagSet.Add([string]$tag) }
+    $configured = @($Majors | ForEach-Object { [string]$_ } | Sort-Object { [int]$_ } -Unique)
+    if ($configured.Count -eq 0) { return @() }
     $plan = [System.Collections.Generic.List[object]]::new()
+    $rebuildRequired = $false
+
     foreach ($major in @($FailedMajors | ForEach-Object { [string]$_ } | Sort-Object { [int]$_ } -Unique)) {
+        if ($configured -notcontains $major) { continue }
         $result = @($CompatibilityResults | Where-Object { [string]$_.postgresqlMajor -eq $major } | Select-Object -First 1)
         if ($result.Count -eq 0 -or [string]$result[0].status -ne 'failed' -or [string]$result[0].failureClass -ne 'compatibility') { continue }
+
         $artifact = $Artifacts[$major]
         if (-not $artifact -or -not $artifact.filename -or -not $artifact.url) {
-            throw "Cannot create targeted rebuild for PostgreSQL ${major}: current exact EDB artifact is missing (fail closed)."
+            throw "Cannot create unified compatibility rebuild for PostgreSQL ${major}: current exact EDB artifact is missing (fail closed)."
         }
         $parsedCurrent = ConvertFrom-EdbArtifactFilename -Filename ([string]$artifact.filename)
         if (-not $parsedCurrent -or $parsedCurrent.major -ne $major -or $parsedCurrent.revision -ne [int]$artifact.revision) {
-            throw "Cannot create targeted rebuild for PostgreSQL ${major}: current EDB artifact identity is malformed or inconsistent."
+            throw "Cannot create unified compatibility rebuild for PostgreSQL ${major}: current EDB artifact identity is malformed or inconsistent."
         }
-        $release = @($LocalReleases | ForEach-Object {
-            $identity = ConvertFrom-LocalReleaseTag -Tag ([string]$_.tag_name)
-            if ($identity -and $identity.pglogicalVersion -eq $Version -and $identity.postgresqlMajor -eq $major -and (Test-PublishedRelease -Release $_)) {
-                [pscustomobject]@{ release = $_; identity = $identity }
-            }
-        } | Sort-Object { $_.identity.windowsPackagingRevision } | Select-Object -Last 1)
-        if ($release.Count -eq 0) { continue }
+
         $recordedFilename = [string]$result[0].localPackageBuildArtifactFilename
-        if (-not $recordedFilename) { $recordedFilename = Get-EdbArtifactFromReleaseBody -Body ([string]$release[0].release.body) }
+        if (-not $recordedFilename) {
+            $release = Select-LatestReleaseForMajor -Major $major -Releases $LocalReleases
+            if ($release) { $recordedFilename = Get-EdbArtifactFromReleaseBody -Body ([string]$release.body) -PostgresqlMajor $major }
+        }
         $parsedRecorded = ConvertFrom-EdbArtifactFilename -Filename $recordedFilename
         if (-not $parsedRecorded -or $parsedRecorded.major -ne $major) {
-            throw "Cannot create targeted rebuild for PostgreSQL ${major}: package artifact identity is missing or malformed ('$recordedFilename'); failing closed."
+            throw "Cannot create unified compatibility rebuild for PostgreSQL ${major}: package artifact identity is missing or malformed ('$recordedFilename'); failing closed."
         }
         if ([int]$parsedCurrent.minor -lt [int]$parsedRecorded.minor -or ([int]$parsedCurrent.minor -eq [int]$parsedRecorded.minor -and $parsedCurrent.revision -lt $parsedRecorded.revision)) {
             throw "Current EDB artifact $($artifact.filename) is older than the package artifact $recordedFilename for PostgreSQL $major; refusing a downgrade (fail closed)."
         }
         if ([int]$parsedCurrent.minor -eq [int]$parsedRecorded.minor -and $parsedCurrent.revision -eq $parsedRecorded.revision) { continue }
 
-        $highest = @($LocalReleases | ForEach-Object {
-            $identity = ConvertFrom-LocalReleaseTag -Tag ([string]$_.tag_name)
-            if ($identity -and $identity.pglogicalVersion -eq $Version -and $identity.postgresqlMajor -eq $major -and (Test-PublishedRelease -Release $_)) {
-                $identity.windowsPackagingRevision
-            }
-        } | Measure-Object -Maximum).Maximum
-        if ($null -eq $highest) { $highest = 0 }
-        $nextRevision = [int]$highest + 1
-        $targetTag = Get-LocalReleaseTag -Version $Version -PackagingRevision $nextRevision -PgMajor $major
-        if ($existingTagSet.Contains($targetTag)) { continue }
         $provenance = $result[0].packageProvenance
         $sourceVersion = if ($provenance -and $provenance.pglogicalVersion) { [string]$provenance.pglogicalVersion } else { $Version }
         $sourceTag = if ($provenance -and $provenance.upstreamTag) { [string]$provenance.upstreamTag } else { $UpstreamTag }
@@ -584,6 +686,41 @@ function Get-TargetedRebuildPlan {
         if ($sourceVersion -ne $Version -or $sourceTag -ne $UpstreamTag -or $sourceSha -ne $CommitSha) {
             throw "Package provenance for PostgreSQL $major does not match the requested upstream release; refusing to rebuild with mixed source identity."
         }
+        $rebuildRequired = $true
+    }
+
+    if (-not $rebuildRequired) { return @() }
+
+    foreach ($major in $configured) {
+        $artifact = $Artifacts[$major]
+        if (-not $artifact -or -not $artifact.filename -or -not $artifact.url) {
+            throw "Cannot create unified compatibility rebuild for PostgreSQL ${major}: every configured major needs an exact EDB artifact (fail closed)."
+        }
+        $parsed = ConvertFrom-EdbArtifactFilename -Filename ([string]$artifact.filename)
+        if (-not $parsed -or $parsed.major -ne $major -or $parsed.revision -ne [int]$artifact.revision) {
+            throw "Cannot create unified compatibility rebuild for PostgreSQL ${major}: current EDB artifact identity is malformed or inconsistent."
+        }
+    }
+
+    $existingTagSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($tag in @($ExistingReleaseTags)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$tag)) { $null = $existingTagSet.Add([string]$tag) }
+    }
+    $inFlightTagSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($tag in @($InFlightTags)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$tag)) { $null = $inFlightTagSet.Add([string]$tag) }
+    }
+    $nextRevision = Get-NextCommonPackagingRevision -Version $Version -Releases $LocalReleases -ExistingReleaseTags $ExistingReleaseTags
+    $targetTag = Get-LocalReleaseTag -Version $Version -PackagingRevision $nextRevision
+    if ($inFlightTagSet.Contains($targetTag)) { return @() }
+    while ($existingTagSet.Contains($targetTag)) {
+        $nextRevision++
+        $targetTag = Get-LocalReleaseTag -Version $Version -PackagingRevision $nextRevision
+        if ($inFlightTagSet.Contains($targetTag)) { return @() }
+    }
+
+    foreach ($major in $configured) {
+        $artifact = $Artifacts[$major]
         $plan.Add([pscustomobject]@{
             pglogicalVersion = $Version
             upstreamTag = $UpstreamTag
@@ -701,18 +838,18 @@ function Resolve-UpstreamSource {
 function Get-ReleasePlan {
     <#
     .SYNOPSIS
-        Computes the normal upstream-release plan for one pglogical version.
+        Computes the normal unified upstream-release plan for one pglogical
+        version. Every planned entry shares one Windows release tag; the
+        PostgreSQL major remains in the package asset identity.
 
     .DESCRIPTION
         Normal release discovery is intentionally independent from EDB drift:
-        a published local release covers a version × major forever in this
-        planner. Only a missing published release is planned, always as
-        w1. Compatibility smoke evidence is the only path that may
-        request a later Windows packaging revision.
-
-        The exact EDB artifact is required only for missing majors. This keeps
-        a transient EDB outage or a minor/revision change from turning a
-        covered upstream release into a normal rebuild.
+        a complete published package asset covers a version × major forever in
+        this planner. If any configured major is missing, a complete new
+        unified release is planned for every configured major. A later
+        packaging revision is used only when an earlier common revision/tag is
+        already occupied; compatibility smoke is the path that normally asks
+        for that revision.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Version,
@@ -720,24 +857,31 @@ function Get-ReleasePlan {
         [Parameter(Mandatory = $true)][string]$CommitSha,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Majors,
         [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Artifacts,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$LocalReleases
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$LocalReleases,
+        [switch]$ForceUnified
     )
 
-    $missing = @(Get-MissingReleaseMajors -Version $Version -Majors $Majors -LocalReleases $LocalReleases)
+    $configured = @($Majors | ForEach-Object { [string]$_ } | Sort-Object { [int]$_ } -Unique)
+    $missing = @(Get-MissingReleaseMajors -Version $Version -Majors $configured -LocalReleases $LocalReleases)
+    if ($missing.Count -eq 0 -and -not $ForceUnified) { return @() }
+    if ($ForceUnified) { Write-Verbose "Forced unified migration plan requested for pglogical $Version." }
+
+    $revision = Get-NextCommonPackagingRevision -Version $Version -Releases $LocalReleases
+    $localTag = Get-LocalReleaseTag -Version $Version -PackagingRevision $revision
     $plan = [System.Collections.Generic.List[object]]::new()
-    foreach ($key in $missing) {
+    foreach ($key in $configured) {
         $artifact = $Artifacts[$key]
         if (-not $artifact) {
-            throw "Cannot plan a release for PostgreSQL ${key}: no exact EDB artifact identity was resolved (fail closed)."
+            throw "Cannot plan a unified release for PostgreSQL ${key}: no exact EDB artifact identity was resolved (fail closed)."
         }
         if (-not $artifact.filename -or -not $artifact.url) {
-            throw "Cannot plan a release for PostgreSQL ${key}: the resolved EDB artifact identity is incomplete (filename/url missing; fail closed)."
+            throw "Cannot plan a unified release for PostgreSQL ${key}: the resolved EDB artifact identity is incomplete (filename/url missing; fail closed)."
         }
         $parsed = ConvertFrom-EdbArtifactFilename -Filename ([string]$artifact.filename)
         if (-not $parsed -or $parsed.major -ne $key -or $parsed.revision -ne [int]$artifact.revision) {
-            throw "Cannot plan a release for PostgreSQL ${key}: resolved EDB artifact identity is malformed or inconsistent (fail closed)."
+            throw "Cannot plan a unified release for PostgreSQL ${key}: resolved EDB artifact identity is malformed or inconsistent (fail closed)."
         }
-        Write-Host "No local release for pglogical $Version / PostgreSQL $key; planning w1 against $($artifact.filename)"
+        Write-Host "No complete unified release for pglogical $Version / PostgreSQL $key; planning $localTag against $($artifact.filename)"
         $plan.Add([pscustomobject]@{
             pglogicalVersion = $Version
             upstreamTag = $UpstreamTag
@@ -745,11 +889,11 @@ function Get-ReleasePlan {
             postgresqlMajor = $key
             postgresqlMinor = [string]$artifact.minor
             postgresqlBuildVersion = "$($artifact.major).$($artifact.minor)"
-            windowsPackagingRevision = 1
+            windowsPackagingRevision = $revision
             edbPackagingRevision = [int]$artifact.revision
             edbArtifactFilename = [string]$artifact.filename
             edbArtifactUrl = [string]$artifact.url
-            localTag = Get-LocalReleaseTag -Version $Version -PackagingRevision 1 -PgMajor $key
+            localTag = $localTag
         })
     }
     return @($plan)
@@ -1217,20 +1361,38 @@ function ConvertFrom-EdbArtifactFilename {
 function Get-EdbArtifactFromReleaseBody {
     <#
     .SYNOPSIS
-        Extracts the EDB binaries archive filename recorded in a release
-        body. Accepts both the current provenance row ("EDB binaries
-        archive") and the legacy row ("EDB binaries SHA-256" whose value
-        embeds "<sha256>  <filename>"). Returns $null when neither row
-        records a filename.
+        Extracts the EDB binaries archive filename recorded in a release body.
+        Unified release bodies contain one provenance section per PostgreSQL
+        major; legacy bodies contain one unscoped provenance row.
     #>
-    param([string]$Body)
+    param(
+        [string]$Body,
+        [string]$PostgresqlMajor = ''
+    )
     if ([string]::IsNullOrWhiteSpace($Body)) { return $null }
-    foreach ($line in ($Body -split '\r?\n')) {
+    $text = $Body -replace "`r", ''
+    $section = $text
+    if ($PostgresqlMajor) {
+        $majorPattern = [regex]::Escape($PostgresqlMajor)
+        $sectionMatch = [regex]::Match($text, "(?ms)^###\s+PostgreSQL\s+$majorPattern\s*$.*?(?=^###\s+PostgreSQL\s+|\z)")
+        if ($sectionMatch.Success) { $section = $sectionMatch.Value }
+    }
+    foreach ($line in ($section -split "`n")) {
         if ($line -match '^\|\s*EDB binaries archive\s*\|\s*`([^`]+)`\s*\|') {
             return $matches[1].Trim()
         }
     }
-    foreach ($line in ($Body -split '\r?\n')) {
+    foreach ($line in ($section -split "`n")) {
+        if ($line -match '^\|\s*EDB binaries SHA-256\s*\|\s*`([^`]+)`\s*\|') {
+            $tokens = @($matches[1].Trim() -split '\s+')
+            if ($tokens.Count -ge 2) { return $tokens[-1].Trim() }
+        }
+    }
+    # A legacy body has no major heading. For a requested major, the caller
+    # validates the returned filename against that major afterwards.
+    if ($PostgresqlMajor -and $section -ne $text) { return $null }
+    foreach ($line in ($text -split "`n")) {
+        if ($line -match '^\|\s*EDB binaries archive\s*\|\s*`([^`]+)`\s*\|') { return $matches[1].Trim() }
         if ($line -match '^\|\s*EDB binaries SHA-256\s*\|\s*`([^`]+)`\s*\|') {
             $tokens = @($matches[1].Trim() -split '\s+')
             if ($tokens.Count -ge 2) { return $tokens[-1].Trim() }
@@ -1457,15 +1619,29 @@ function Get-GitHubReleaseByTag {
 function Get-ReleasePackageAssets {
     <#
     .SYNOPSIS
-        Selects exactly one package ZIP and exactly one SHA256SUMS.txt asset.
+        Selects one requested package ZIP and exactly one SHA256SUMS.txt
+        asset. Unified releases may expose multiple package ZIPs; callers must
+        identify the PostgreSQL-specific package explicitly.
     #>
-    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Assets)
-    $package = @($Assets | Where-Object {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Assets,
+        [string]$PackageAssetName = ''
+    )
+    $packages = @($Assets | Where-Object {
         $name = if ($null -ne $_.PSObject.Properties['name']) { [string]$_.name } else { '' }
         $name -match '\.zip$' -and $name -notmatch '(?i)(sha256|checksum|sums)'
     })
-    if ($package.Count -ne 1) {
-        throw "Release must expose exactly one package ZIP asset; found $($package.Count)."
+    if ($PackageAssetName) {
+        $package = @($packages | Where-Object { [string]$_.name -eq $PackageAssetName })
+        if ($package.Count -ne 1) {
+            throw "Release must expose requested package ZIP asset '$PackageAssetName' exactly once; found $($package.Count)."
+        }
+    }
+    else {
+        if ($packages.Count -ne 1) {
+            throw "Release must expose exactly one package ZIP asset when no package name is supplied; found $($packages.Count)."
+        }
+        $package = @($packages[0])
     }
     $checksums = @($Assets | Where-Object {
         $name = if ($null -ne $_.PSObject.Properties['name']) { [string]$_.name } else { '' }
@@ -1582,7 +1758,8 @@ function Test-ReleasePackageProvenance {
     $tagIdentity = ConvertFrom-LocalReleaseTag -Tag $ReleaseTag
     if (-not $tagIdentity) { throw "Release tag '$ReleaseTag' has an invalid local release format." }
     if ([string]$Info.pglogicalVersion -ne $tagIdentity.pglogicalVersion) { throw 'BUILD-INFO.json pglogicalVersion does not match the release tag.' }
-    if ([string]$Info.postgresqlCompatibilityMajor -ne $PostgresqlMajor -or [string]$Info.postgresqlCompatibilityMajor -ne $tagIdentity.postgresqlMajor) { throw 'BUILD-INFO.json PostgreSQL compatibility major does not match the requested/release major.' }
+    if ([string]$Info.postgresqlCompatibilityMajor -ne $PostgresqlMajor) { throw 'BUILD-INFO.json PostgreSQL compatibility major does not match the requested major.' }
+    if ($tagIdentity.isLegacy -and [string]$Info.postgresqlCompatibilityMajor -ne $tagIdentity.postgresqlMajor) { throw 'BUILD-INFO.json PostgreSQL compatibility major does not match the legacy release tag major.' }
     if ([int]$Info.windowsPackagingRevision -lt 1) { throw 'BUILD-INFO.json windowsPackagingRevision is invalid.' }
     if ([int]$Info.windowsPackagingRevision -ne $tagIdentity.windowsPackagingRevision) { throw 'BUILD-INFO.json windowsPackagingRevision does not match the release tag.' }
     if ([string]$Info.upstreamTag -notmatch (Get-UpstreamTagPattern) -or [string]$Info.upstreamCommitSha -notmatch '^[0-9a-fA-F]{40}$') { throw 'BUILD-INFO.json upstream identity is malformed.' }
@@ -1668,33 +1845,33 @@ function Test-ReleaseOwnership {
 function Select-LatestRelease {
     <#
     .SYNOPSIS
-        Deterministically selects which release must be GitHub Latest for a
-        pglogical version: the highest configured PostgreSQL major that has
-        a published (non-draft, non-prerelease) release for that version.
-        Drafts, prereleases, unrelated versions, and unconfigured majors are
-        ignored. Returns the matching release tag, or $null when none exists.
+        Selects the complete unified release that should be GitHub Latest for
+        the requested pglogical version. Only a published common tag whose
+        assets contain every configured PostgreSQL major is eligible.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Version,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Majors,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Releases
     )
-    $pattern = "^$([regex]::Escape($Version))-pg([0-9]+)-w([0-9]+)$"
-    $configured = @($Majors | ForEach-Object { [string]$_ } | Sort-Object { [int]$_ })
-    $best = $null   # @{ major; revision; tag }
-    foreach ($major in $configured) {
-        $bestForMajor = $null
-        foreach ($r in $Releases) {
-            if ($r.draft -or $r.prerelease) { continue }
-            $m = [regex]::Match([string]$r.tag_name, $pattern)
-            if (-not $m.Success) { continue }
-            if ($m.Groups[1].Value -ne $major) { continue }
-            $revision = [int]$m.Groups[2].Value
-            if (-not $bestForMajor -or $revision -gt $bestForMajor.revision) {
-                $bestForMajor = @{ major = $major; revision = $revision; tag = [string]$r.tag_name }
+    $configured = @($Majors | ForEach-Object { [string]$_ } | Sort-Object { [int]$_ } -Unique)
+    $best = $null
+    foreach ($release in @($Releases)) {
+        if (-not (Test-PublishedRelease -Release $release)) { continue }
+        $identity = ConvertFrom-LocalReleaseTag -Tag ([string]$release.tag_name)
+        if (-not $identity -or $identity.isLegacy -or $identity.pglogicalVersion -ne $Version) { continue }
+        $complete = $true
+        foreach ($major in $configured) {
+            if (-not (Test-ReleaseContainsPackageForMajor -Release $release -Major $major)) { $complete = $false; break }
+        }
+        if (-not $complete) { continue }
+        if (-not $best -or $identity.windowsPackagingRevision -gt $best.windowsPackagingRevision) {
+            $best = [pscustomobject]@{
+                tag = $identity.tag_name
+                version = $identity.version
+                windowsPackagingRevision = $identity.windowsPackagingRevision
             }
         }
-        if ($bestForMajor) { $best = $bestForMajor }
     }
     if (-not $best) { return $null }
     return $best.tag
@@ -1736,6 +1913,8 @@ function Test-ReleasePlan {
     $planVersion = $null
     $planTag = $null
     $planSha = $null
+    $planWindowsRevision = $null
+    $planLocalTag = $null
     foreach ($e in $entries) {
         # Whole-plan consistency: every entry must target the same upstream
         # release and commit (one pglogical version per plan).
@@ -1752,6 +1931,13 @@ function Test-ReleasePlan {
             if ($null -eq $propInfo -or $null -eq $propInfo.Value) {
                 throw "Release plan entry is missing required property '$prop'."
             }
+        }
+        if ($null -eq $planWindowsRevision) {
+            $planWindowsRevision = [int]$e.windowsPackagingRevision
+            $planLocalTag = [string]$e.localTag
+        }
+        elseif ([int]$e.windowsPackagingRevision -ne $planWindowsRevision -or [string]$e.localTag -ne $planLocalTag) {
+            throw 'Release plan mixes different Windows packaging revisions or local release tags; one unified release must contain all PostgreSQL major entries.'
         }
         if ([string]$e.upstreamCommitSha -notmatch '^[0-9a-fA-F]{40}$') {
             throw "Release plan entry has invalid upstreamCommitSha '$($e.upstreamCommitSha)' (expected 40 hex characters)."
@@ -1770,7 +1956,7 @@ function Test-ReleasePlan {
             throw "Release plan contains duplicate PostgreSQL major '$major'."
         }
         $seenMajors[$major] = $true
-        $expectedLocalTag = Get-LocalReleaseTag -Version ([string]$e.pglogicalVersion) -PackagingRevision ([int]$e.windowsPackagingRevision) -PgMajor $major
+        $expectedLocalTag = Get-LocalReleaseTag -Version ([string]$e.pglogicalVersion) -PackagingRevision ([int]$e.windowsPackagingRevision)
         if ([string]$e.localTag -ne $expectedLocalTag) {
             throw "Release plan entry localTag '$($e.localTag)' does not match the expected release tag '$expectedLocalTag'."
         }
