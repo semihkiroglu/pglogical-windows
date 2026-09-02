@@ -45,6 +45,15 @@ Test-Case 'Release workflow publishes one complete unified release' {
     Assert-False ($publishBlock.Contains('-PgMajor'))
 }
 
+Test-Case 'Release publisher captures a created draft release without a git tag dependency' {
+    $captureBlock = [regex]::Match($release, '(?ms)- name: Capture created release identity.*?(?=      - name:)').Value
+    Assert-True ($captureBlock -match 'Capture created release identity')
+    Assert-False ($captureBlock -match 'releases/tags/\$env:RELEASE_TAG')
+    Assert-True ($captureBlock -match 'gh api "repos/\$env:GITHUB_REPOSITORY/releases"')
+    Assert-True ($captureBlock -match '\$ENV\.RELEASE_TAG')
+    Assert-True ($captureBlock -match 'ConvertFrom-Json')
+}
+
 Test-Case 'Compatibility workflow exposes force, failure classes, and unified dispatch' {
     Assert-True ($compat -match 'force:')
     Assert-True ($compat -match "failureClass = 'download'")

@@ -489,12 +489,17 @@ jobs:
           RELEASE_TAG: ${{ steps.prepare.outputs.releaseTag }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # A draft release has no git tag ref yet, so GET /releases/tags/<tag>
+          # 404s until publication. Drafts are still listed by the releases
+          # endpoint, so match tag_name there instead.
           $release = $null
-          for ($attempt = 0; $attempt -lt 5 -and -not $release; $attempt++) {
-            $raw = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" 2>$null
+          for ($attempt = 0; $attempt -lt 10 -and -not $release; $attempt++) {
+            $raw = gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.tag_name == $ENV.RELEASE_TAG)' 2>$null
             $exitCode = $LASTEXITCODE
-            if ($exitCode -eq 0 -and $raw) { $release = $raw | ConvertFrom-Json }
-            if (-not $release) { Start-Sleep -Seconds 2 }
+            if ($exitCode -eq 0 -and $raw) {
+              $release = @($raw | ForEach-Object { $_ | ConvertFrom-Json } | Select-Object -First 1)
+            }
+            if (-not $release) { Start-Sleep -Seconds 3 }
           }
           if (-not $release -or -not $release.id) { throw "Could not resolve the release ID for $env:RELEASE_TAG after release creation." }
           'created=true' >> $env:GITHUB_OUTPUT
