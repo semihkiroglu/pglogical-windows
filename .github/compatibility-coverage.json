@@ -1,4 +1,50 @@
 {
   "schemaVersion": 1,
-  "entries": []
+  "entries": [
+    {
+      "postgresqlMajor": "14",
+      "localReleaseTag": "2.4.8-w1",
+      "localPackageAssetName": "pglogical-2.4.8-pg14-w1-x64.zip",
+      "localPackageBuildArtifactFilename": "postgresql-14.24-2-windows-x64-binaries.zip",
+      "serverEdbArtifactFilename": "postgresql-14.24-3-windows-x64-binaries.zip",
+      "serverEdbArtifactUrl": "https://get.enterprisedb.com/postgresql/postgresql-14.24-3-windows-x64-binaries.zip",
+      "status": "passed"
+    },
+    {
+      "postgresqlMajor": "15",
+      "localReleaseTag": "2.4.8-w1",
+      "localPackageAssetName": "pglogical-2.4.8-pg15-w1-x64.zip",
+      "localPackageBuildArtifactFilename": "postgresql-15.19-3-windows-x64-binaries.zip",
+      "serverEdbArtifactFilename": "postgresql-15.19-4-windows-x64-binaries.zip",
+      "serverEdbArtifactUrl": "https://get.enterprisedb.com/postgresql/postgresql-15.19-4-windows-x64-binaries.zip",
+      "status": "passed"
+    },
+    {
+      "postgresqlMajor": "16",
+      "localReleaseTag": "2.4.8-w1",
+      "localPackageAssetName": "pglogical-2.4.8-pg16-w1-x64.zip",
+      "localPackageBuildArtifactFilename": "postgresql-16.15-3-windows-x64-binaries.zip",
+      "serverEdbArtifactFilename": "postgresql-16.15-4-windows-x64-binaries.zip",
+      "serverEdbArtifactUrl": "https://get.enterprisedb.com/postgresql/postgresql-16.15-4-windows-x64-binaries.zip",
+      "status": "passed"
+    },
+    {
+      "postgresqlMajor": "17",
+      "localReleaseTag": "2.4.8-w1",
+      "localPackageAssetName": "pglogical-2.4.8-pg17-w1-x64.zip",
+      "localPackageBuildArtifactFilename": "postgresql-17.11-3-windows-x64-binaries.zip",
+      "serverEdbArtifactFilename": "postgresql-17.11-4-windows-x64-binaries.zip",
+      "serverEdbArtifactUrl": "https://get.enterprisedb.com/postgresql/postgresql-17.11-4-windows-x64-binaries.zip",
+      "status": "passed"
+    },
+    {
+      "postgresqlMajor": "18",
+      "localReleaseTag": "2.4.8-w1",
+      "localPackageAssetName": "pglogical-2.4.8-pg18-w1-x64.zip",
+      "localPackageBuildArtifactFilename": "postgresql-18.6-3-windows-x64-binaries.zip",
+      "serverEdbArtifactFilename": "postgresql-18.6-4-windows-x64-binaries.zip",
+      "serverEdbArtifactUrl": "https://get.enterprisedb.com/postgresql/postgresql-18.6-4-windows-x64-binaries.zip",
+      "status": "passed"
+    }
+  ]
 }
