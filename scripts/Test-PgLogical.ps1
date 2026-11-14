@@ -614,6 +614,7 @@ try {
         # start is forced without via -c shared_preload_libraries='').
         $subConf = Join-Path $WorkDir 'subscriber-postgresql.conf'
         @(
+            "wal_level = logical",
             "port = $subPort",
             "listen_addresses = '127.0.0.1'",
             "shared_preload_libraries = 'pglogical'",
